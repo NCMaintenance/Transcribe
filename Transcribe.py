@@ -1,60 +1,61 @@
 import streamlit as st
+from streamlit_webrtc import webrtc_streamer, WebRtcMode, ClientSettings
+import av
+import whisper
+import numpy as np
+import queue
+import tempfile
 import os
-from pydub import AudioSegment
-import speech_recognition as sr
-from PIL import Image
-from streamlit_audiorecorder import audiorecorder
-from streamlit_extras.add_vertical_space import add_vertical_space
-from dotenv import load_dotenv
+import wave
 
-# Load environment variables if using APIs later
-load_dotenv()
+st.title("Real-Time Audio Transcription")
 
-st.set_page_config(page_title="Audio & Image Uploader", layout="centered")
-st.title("Audio and Image Transcription Tool")
-add_vertical_space(1)
+model = whisper.load_model("base")
 
-# === IMAGE UPLOAD ===
-st.subheader("Upload an Image")
-image_file = st.file_uploader("Choose an image", type=["jpg", "jpeg", "png"])
-if image_file:
-    image = Image.open(image_file)
-    st.image(image, caption="Uploaded Image", use_column_width=True)
+audio_queue = queue.Queue()
 
-add_vertical_space(2)
+# Define audio processor class
+class AudioProcessor:
+    def __init__(self):
+        self.frames = []
 
-# === AUDIO RECORD OR UPLOAD ===
-st.subheader("Record or Upload Audio")
+    def recv(self, frame: av.AudioFrame) -> av.AudioFrame:
+        audio = frame.to_ndarray().flatten().astype(np.int16)
+        audio_queue.put(audio.tobytes())
+        return frame
 
-audio_bytes = audiorecorder("Click to record", "Recording...")
-uploaded_audio_file = st.file_uploader("Or upload a WAV/MP3 file", type=["wav", "mp3"])
+# WebRTC settings
+webrtc_streamer(
+    key="audio",
+    mode=WebRtcMode.SENDONLY,
+    in_audio=True,
+    audio_processor_factory=AudioProcessor,
+    client_settings=ClientSettings(
+        media_stream_constraints={"video": False, "audio": True},
+        rtc_configuration={"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
+    )
+)
 
-final_audio_path = None
+# Button to trigger transcription
+if st.button("Transcribe"):
+    st.info("Processing audio...")
 
-# Save recorded audio
-if audio_bytes:
-    with open("recorded.wav", "wb") as f:
-        f.write(audio_bytes)
-    final_audio_path = "recorded.wav"
-elif uploaded_audio_file:
-    audio_format = uploaded_audio_file.name.split(".")[-1]
-    audio = AudioSegment.from_file(uploaded_audio_file, format=audio_format)
-    audio.export("uploaded.wav", format="wav")
-    final_audio_path = "uploaded.wav"
+    # Write audio to temp WAV file
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+        wf = wave.open(f, 'wb')
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(44100)
 
-# === TRANSCRIPTION ===
-if final_audio_path:
-    recognizer = sr.Recognizer()
-    with sr.AudioFile(final_audio_path) as source:
-        audio_data = recognizer.record(source)
+        while not audio_queue.empty():
+            wf.writeframes(audio_queue.get())
+        wf.close()
+        audio_path = f.name
 
-    try:
-        transcript = recognizer.recognize_google(audio_data)
-        st.success("Transcription:")
-        st.write(transcript)
-    except sr.UnknownValueError:
-        st.error("Could not understand the audio.")
-    except sr.RequestError:
-        st.error("Could not request results from Google Speech Recognition service.")
+    # Transcribe with Whisper
+    result = model.transcribe(audio_path)
+    st.success("Transcription complete!")
+    st.text_area("Transcribed Text:", result["text"], height=200)
 
-    os.remove(final_audio_path)
+    # Clean up
+    os.remove(audio_path)
