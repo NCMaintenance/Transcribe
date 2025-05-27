@@ -19,17 +19,31 @@ GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini
 
 st.set_page_config(page_title="Dr. Scribe Enhanced", layout="wide")
 st.title("Dr. Scribe - Enhanced Transcription & Note Analysis")
+
+# --- Initialize Session State ---
+if 'raw_transcript' not in st.session_state:
+    st.session_state.raw_transcript = ""
+if 'formatted_transcript' not in st.session_state:
+    st.session_state.formatted_transcript = ""
+if 'last_processed_audio_data' not in st.session_state:
+    st.session_state.last_processed_audio_data = ""
+if 'extracted_file_info' not in st.session_state:
+    st.session_state.extracted_file_info = ""
+
+
+# --- API Key Check and Main App Intro ---
+if not GEMINI_API_KEY or GEMINI_API_KEY == "YOUR_GEMINI_API_KEY_HERE":
+    st.error("🔴 CRITICAL: Gemini API Key is not configured. Please set it in Streamlit secrets (key: `GEMINI_API_KEY`) or update the `GEMINI_API_KEY` variable in the script if running locally without secrets. The application will not function correctly without it.")
+
 st.markdown("""
 Welcome to Dr. Scribe! This tool helps you:
 1.  Record audio and get it transcribed by Gemini.
 2.  Format the transcript into a structured doctor's note.
 3.  Upload patient letters or notes (text, PDF, or image files) and extract key information.
 
-**Note:**
-- For this app to function, a Gemini API Key is required.
-  - If running on Streamlit Community Cloud, set it as `GEMINI_API_KEY` in your app's secrets.
-  - If running locally and not using a secrets file, replace `YOUR_GEMINI_API_KEY_HERE` in the script.
+**Important Notes:**
 - For PDF processing, ensure `pdfplumber` is installed (`pip install pdfplumber`).
+- Ensure microphone permissions are granted in your browser for audio recording.
 """)
 
 # --- Helper Function for Gemini API Calls ---
@@ -39,7 +53,8 @@ def call_gemini_api(payload):
     Returns the JSON response or None if an error occurs.
     """
     if not GEMINI_API_KEY or GEMINI_API_KEY == "YOUR_GEMINI_API_KEY_HERE":
-        st.error("CRITICAL: Gemini API Key is not set. Please configure it in Streamlit secrets (GEMINI_API_KEY) or update the script.")
+        # This error is already displayed prominently above, but good to have a safeguard here too.
+        st.error("Gemini API Key is missing. Cannot make API call.")
         return None
 
     headers = {
@@ -98,7 +113,7 @@ async function startRecording() {
                     input.dispatchEvent(new Event('change', { bubbles: true }));
                 } else {
                     console.error('Audio data input element not found');
-                    document.getElementById("record-status").innerText = "Error: Could not send audio data.";
+                    document.getElementById("record-status").innerText = "Error: Could not send audio data to application.";
                 }
             };
             reader.readAsDataURL(blob);
@@ -115,9 +130,11 @@ async function startRecording() {
         console.error("Error starting recording:", err);
         let errorMsg = "Error: Could not start recording.";
         if (err.name === "NotAllowedError" || err.name === "PermissionDeniedError") {
-            errorMsg += " Please grant microphone permissions.";
+            errorMsg += " Please grant microphone permissions in your browser settings.";
         } else if (err.name === "NotFoundError" || err.name === "DevicesNotFoundError") {
-            errorMsg += " No microphone found.";
+            errorMsg += " No microphone found. Please ensure a microphone is connected and enabled.";
+        } else if (err.name === "NotReadableError") {
+             errorMsg += " Microphone is already in use or a hardware error occurred.";
         }
         document.getElementById("record-status").innerText = errorMsg;
         document.getElementById("start-record-btn").disabled = false;
@@ -128,11 +145,10 @@ async function startRecording() {
 function stopRecording() {
     if (mediaRecorder && mediaRecorder.state !== 'inactive') {
         mediaRecorder.stop();
-        document.getElementById("record-status").innerText = "Processing audio...";
-        document.getElementById("start-record-btn").disabled = false;
+        document.getElementById("record-status").innerText = "Processing audio... Please wait.";
+        document.getElementById("start-record-btn").disabled = false; // Re-enable start
         document.getElementById("stop-record-btn").disabled = true;
     } else {
-        // Handle case where stop is clicked without active recording
         document.getElementById("record-status").innerText = "Idle. Click 'Start Recording'.";
         document.getElementById("start-record-btn").disabled = false;
         document.getElementById("stop-record-btn").disabled = true;
@@ -140,42 +156,39 @@ function stopRecording() {
 }
 // Initialize button states on load
 window.onload = () => {
-    if (document.getElementById("start-record-btn")) {
-         document.getElementById("start-record-btn").disabled = false;
-    }
-    if (document.getElementById("stop-record-btn")) {
-        document.getElementById("stop-record-btn").disabled = true;
-    }
-}
+    const startBtn = document.getElementById("start-record-btn");
+    const stopBtn = document.getElementById("stop-record-btn");
+    if (startBtn) startBtn.disabled = false;
+    if (stopBtn) stopBtn.disabled = true;
+    const status = document.getElementById("record-status");
+    if (status) status.innerText = "Idle. Click 'Start Recording'.";
+};
 </script>
 
-<div style="padding: 10px; border: 1px solid #ddd; border-radius: 5px; text-align: center;">
+<div style="padding: 10px; border: 1px solid #ddd; border-radius: 5px; text-align: center; margin-bottom: 20px;">
     <h4>Record Patient Notes</h4>
-    <button id="start-record-btn" onclick="startRecording()" style="padding: 10px 15px; margin-right: 10px; background-color: #4CAF50; color: white; border: none; border-radius: 5px; cursor: pointer;">Start Recording</button>
-    <button id="stop-record-btn" onclick="stopRecording()" style="padding: 10px 15px; background-color: #f44336; color: white; border: none; border-radius: 5px; cursor: pointer;" disabled>Stop & Process Audio</button>
-    <p id="record-status" style="margin-top: 10px;">Idle</p>
+    <p style="font-size: 0.9em; color: #555;">Ensure your microphone is enabled and permissions are granted in your browser.</p>
+    <button id="start-record-btn" onclick="startRecording()" style="padding: 10px 15px; margin: 5px; background-color: #4CAF50; color: white; border: none; border-radius: 5px; cursor: pointer;">Start Recording</button>
+    <button id="stop-record-btn" onclick="stopRecording()" style="padding: 10px 15px; margin: 5px; background-color: #f44336; color: white; border: none; border-radius: 5px; cursor: pointer;" disabled>Stop & Process Audio</button>
+    <p id="record-status" style="margin-top: 10px; font-weight: bold;">Idle</p>
     <input type="hidden" id="audio_data_input" />
 </div>
 """
-st.components.v1.html(record_script, height=180)
+st.components.v1.html(record_script, height=220) # Increased height for new text
 
 # Hidden text input to receive audio data from JavaScript
-# The `key` here is for Streamlit's widget identification. JS targets the `id` attribute.
 audio_data_base64_from_js = st.text_input("Audio Base64 (hidden, updated by JS)", key="audio_data_input_streamlit_key", label_visibility="collapsed")
 
-# Process audio when new audio data is received from JavaScript
-if audio_data_base64_from_js and audio_data_base64_from_js != st.session_state.get('last_processed_audio_data', ''):
+# --- Audio Processing Logic ---
+if audio_data_base64_from_js and audio_data_base64_from_js != st.session_state.last_processed_audio_data:
     st.session_state.last_processed_audio_data = audio_data_base64_from_js
-    st.session_state.raw_transcript = "" # Reset previous transcripts
-    st.session_state.formatted_transcript = ""
-
-    st.info("Audio received. Processing...")
+    st.info("New audio data received. Processing...")
 
     with st.spinner("Transcribing audio with Gemini..."):
         audio_payload = {
             "contents": [{
                 "parts": [
-                    {"text": "Transcribe the following audio from a medical context accurately and clearly. Focus on medical terminology if present."},
+                    {"text": "Transcribe the following audio from a medical context accurately and clearly. Focus on medical terminology if present. Ensure the transcription is verbatim."},
                     {"inline_data": {
                         "mime_type": "audio/webm",
                         "data": audio_data_base64_from_js
@@ -189,9 +202,6 @@ if audio_data_base64_from_js and audio_data_base64_from_js != st.session_state.g
         raw_transcript = extract_text_from_gemini_response(transcription_result)
         if raw_transcript:
             st.session_state.raw_transcript = raw_transcript
-            # Displaying new transcript immediately
-            st.subheader("Current Raw Transcription")
-            st.text_area("Raw Transcript", raw_transcript, height=150, key="current_raw_trans_text_area")
 
             with st.spinner("Formatting transcript into Doctor's Note style..."):
                 formatting_prompt = (
@@ -200,9 +210,9 @@ if audio_data_base64_from_js and audio_data_base64_from_js != st.session_state.g
                     "'PAST MEDICAL HISTORY (PMH)', 'MEDICATIONS', 'ALLERGIES', 'SOCIAL HISTORY (SH)', 'FAMILY HISTORY (FH)', "
                     "'REVIEW OF SYSTEMS (ROS)', 'PHYSICAL EXAMINATION (PE)', 'ASSESSMENT (A)', and 'PLAN (P)'. "
                     "If information for a specific section is not clearly present in the transcript, state 'Not discussed' or 'N/A', or omit the heading. "
-                    "Ensure the output is well-organized and easy to read.\n\n"
+                    "Ensure the output is well-organized, professional, and easy to read.\n\n"
                     "Raw Transcript:\n"
-                    f"{raw_transcript}"
+                    f"{st.session_state.raw_transcript}"
                 )
                 formatting_payload = {"contents": [{"parts": [{"text": formatting_prompt}]}]}
                 formatting_result = call_gemini_api(formatting_payload)
@@ -211,33 +221,41 @@ if audio_data_base64_from_js and audio_data_base64_from_js != st.session_state.g
                 formatted_transcript = extract_text_from_gemini_response(formatting_result)
                 if formatted_transcript:
                     st.session_state.formatted_transcript = formatted_transcript
-                    st.subheader("Current Formatted Doctor's Note")
-                    st.text_area("Formatted Note", formatted_transcript, height=300, key="current_fmt_trans_text_area")
                 else:
                     st.error("Could not extract formatted transcript from Gemini response.")
+                    st.session_state.formatted_transcript = "Error: Formatting failed." # Placeholder
             else:
                 st.error("Failed to get a formatting response from Gemini.")
+                st.session_state.formatted_transcript = "Error: No formatting response." # Placeholder
         else:
             st.error("Could not extract raw transcript from Gemini response.")
+            st.session_state.raw_transcript = "Error: Transcription failed." # Placeholder
+            st.session_state.formatted_transcript = ""
     else:
         st.error("Failed to get a transcription response from Gemini.")
-    # No need to clear audio_data_base64_from_js, its change triggers this block.
-    # The st.session_state['last_processed_audio_data'] prevents re-processing.
+        st.session_state.raw_transcript = "Error: No transcription response." # Placeholder
+        st.session_state.formatted_transcript = ""
 
-# Display existing transcripts if they are in session state and no new audio is being processed
-elif not audio_data_base64_from_js and st.session_state.get('raw_transcript'): # Show if no new audio and old exists
-    st.subheader("Previous Raw Transcription")
-    st.text_area("Raw Transcript", st.session_state.raw_transcript, height=150, key="prev_raw_trans_text_area_stale")
-    if st.session_state.get('formatted_transcript'):
-        st.subheader("Previous Formatted Doctor's Note")
-        st.text_area("Formatted Note", st.session_state.formatted_transcript, height=300, key="prev_fmt_trans_text_area_stale")
+# --- Display Last Processed Audio Transcripts ---
+if st.session_state.raw_transcript:
+    st.subheader("Last Processed Audio Transcription")
+    st.text_area("Raw Transcript", st.session_state.raw_transcript, height=150, key="displayed_raw_transcript")
+    if st.session_state.formatted_transcript:
+        st.subheader("Formatted Doctor's Note from Audio")
+        st.text_area("Formatted Note", st.session_state.formatted_transcript, height=300, key="displayed_formatted_transcript")
+    elif st.session_state.raw_transcript and not st.session_state.raw_transcript.startswith("Error:"):
+        st.warning("Raw transcript is available, but formatting failed or is pending.")
 
 
 st.divider()
 
 # --- Letter Analysis Section ---
 st.header("Analyze Uploaded Letter/Notes")
-st.markdown("Upload a text file (.txt, .md), PDF (.pdf), or image (.png, .jpg, .jpeg) containing patient letters or notes.")
+st.markdown("""
+Upload a text file (.txt, .md), PDF (.pdf), or image (.png, .jpg, .jpeg) containing patient letters or notes.
+- **PDFs:** Text-based PDFs work best. Encrypted or image-only PDFs may not yield text.
+- **Images:** Clear, high-resolution images provide better analysis.
+""")
 
 uploaded_file = st.file_uploader(
     "Choose a file",
@@ -249,24 +267,21 @@ if uploaded_file is not None:
     st.info(f"File '{uploaded_file.name}' (Type: {uploaded_file.type}) uploaded successfully.")
     extracted_text_from_file = None
     image_base64_for_gemini = None
-    file_mime_type_for_gemini = uploaded_file.type # Store the original mime type
+    file_mime_type_for_gemini = uploaded_file.type
 
     try:
         if uploaded_file.type == "application/pdf":
             with st.spinner("Extracting text from PDF..."):
                 try:
-                    # Use io.BytesIO to treat byte stream from uploader as a file-like object
                     with pdfplumber.open(io.BytesIO(uploaded_file.getvalue())) as pdf:
                         pages_text = [page.extract_text() for page in pdf.pages if page.extract_text() is not None]
                     extracted_text_from_file = "\n".join(pages_text)
                     if not extracted_text_from_file.strip():
-                        st.warning("No text could be extracted from this PDF. It might be an image-based PDF or empty.")
-                        # Future enhancement: Offer to OCR the PDF if text extraction fails.
-                        # For now, we could try sending it as an image if it's small enough, or page by page.
-                        # This example will just report no text.
+                        st.warning("No text could be extracted from this PDF. It might be an image-based PDF, encrypted, password-protected, or empty. For image-based PDFs, try uploading as an image file (e.g., PNG/JPG).")
+                        extracted_text_from_file = None # Ensure it's None if no text
                 except Exception as e:
-                    st.error(f"Error processing PDF: {e}")
-                    st.exception(e) # Provides more detail for debugging
+                    st.error(f"Error processing PDF: {e}. The PDF might be encrypted or corrupted.")
+                    st.exception(e)
                     extracted_text_from_file = None
 
         elif uploaded_file.type in ["image/png", "image/jpeg", "image/jpg"]:
@@ -277,11 +292,11 @@ if uploaded_file is not None:
 
         elif uploaded_file.type in ["text/plain", "text/markdown"]:
              extracted_text_from_file = uploaded_file.read().decode()
-        else: # Fallback for other types that might be text-like
+        else:
              try:
                 extracted_text_from_file = uploaded_file.read().decode()
-                st.warning(f"Processed file type '{uploaded_file.type}' as plain text. Results may vary if this is incorrect.")
-             except Exception: # Broad except as we don't know the encoding
+                st.warning(f"Processed file type '{uploaded_file.type}' as plain text. Results may vary.")
+             except Exception:
                 st.error(f"Could not read file type '{uploaded_file.type}' as text. Please upload a supported format.")
 
         if extracted_text_from_file:
@@ -289,6 +304,7 @@ if uploaded_file is not None:
                 st.text(extracted_text_from_file[:1000] + "..." if len(extracted_text_from_file) > 1000 else extracted_text_from_file)
 
         if st.button("Extract Information from Uploaded File", key="extract_file_btn"):
+            st.session_state.extracted_file_info = "" # Reset previous
             analysis_result_text = None
             if extracted_text_from_file:
                 with st.spinner("Analyzing extracted text with Gemini..."):
@@ -338,7 +354,7 @@ if uploaded_file is not None:
                             "parts": [
                                 {"text": image_analysis_prompt},
                                 {"inline_data": {
-                                    "mime_type": file_mime_type_for_gemini, # Use original mime type
+                                    "mime_type": file_mime_type_for_gemini,
                                     "data": image_base64_for_gemini
                                 }}
                             ]
@@ -351,14 +367,21 @@ if uploaded_file is not None:
                 st.warning("No content (text or image) available to analyze. Please upload a valid file and ensure text could be extracted if it's a PDF.")
 
             if analysis_result_text:
-                st.subheader("Extracted Information from File")
-                st.text_area("Extracted Details", analysis_result_text, height=400, key="extracted_file_info_area")
-            elif extracted_text_from_file or image_base64_for_gemini: # Only show if we attempted analysis
+                st.session_state.extracted_file_info = analysis_result_text
+            elif extracted_text_from_file or image_base64_for_gemini:
                 st.error("Failed to get a response from Gemini for file analysis, or no text was extracted from the response.")
+                st.session_state.extracted_file_info = "Error: Analysis failed."
 
     except Exception as e:
         st.error(f"An unexpected error occurred while processing the uploaded file: {e}")
-        st.exception(e) # Show full traceback for debugging
+        st.exception(e)
+        st.session_state.extracted_file_info = "Error: File processing error."
+
+# --- Display Extracted File Info ---
+if st.session_state.extracted_file_info:
+    st.subheader("Extracted Information from Uploaded File")
+    st.text_area("Extracted Details", st.session_state.extracted_file_info, height=400, key="displayed_extracted_file_info")
+
 
 st.markdown("---")
 st.markdown("Developed with Gemini & Streamlit.")
@@ -368,3 +391,4 @@ st.markdown("Developed with Gemini & Streamlit.")
 # 2. Install dependencies: pip install streamlit requests pdfplumber Pillow
 # 3. Run from your terminal: streamlit run dr_scribe_app.py
 # 4. Configure GEMINI_API_KEY in Streamlit secrets or directly in the script if running locally without secrets.
+
