@@ -1,4 +1,3 @@
 streamlit
-streamlit-webrtc
 openai-whisper
 torch
