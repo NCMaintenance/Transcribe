@@ -177,22 +177,26 @@ if audio_data_base64_from_js and audio_data_base64_from_js != st.session_state.l
     st.session_state.last_processed_audio_data = audio_data_base64_from_js
 
     proceed_with_api_call = False
+    # Defensive: Handle any type for audio_data_base64_from_js before using len()
+    is_valid_audio_string = isinstance(audio_data_base64_from_js, str)
+    audio_length = len(audio_data_base64_from_js) if is_valid_audio_string else 0
+
     if not audio_data_base64_from_js:
         st.warning("Received empty audio data. Please try recording again.")
         st.session_state.raw_transcript = "Error: Received empty audio data from recorder."
         st.session_state.formatted_transcript = ""
-    elif not isinstance(audio_data_base64_from_js, str) or \
+    elif not is_valid_audio_string or \
          audio_data_base64_from_js.lower() == "undefined" or \
-         len(audio_data_base64_from_js) < 100:
-        st.error(f"Audio data appears invalid or too short (length {len(audio_data_base64_from_js)}). Please try again.")
-        st.session_state.raw_transcript = "Error: Invalid or too short audio data received."
+         audio_length < 100:
+        st.error(f"Audio data appears invalid or too short (length {audio_length}). Please try again.")
+        st.session_state.raw_transcript = "Error: Invalid or too short audio data received from recorder."
         st.session_state.formatted_transcript = ""
     else:
         proceed_with_api_call = True
 
     if proceed_with_api_call:
-        if len(audio_data_base64_from_js) < 500:
-            st.warning(f"Recorded audio is quite short (data length: {len(audio_data_base64_from_js)} characters). Transcription quality may be affected.")
+        if audio_length < 500:
+            st.warning(f"Recorded audio is quite short (data length: {audio_length} characters). Transcription quality may be affected.")
         st.info("New audio data received. Processing...")
         with st.spinner("Transcribing audio with Gemini..."):
             audio_payload = {
