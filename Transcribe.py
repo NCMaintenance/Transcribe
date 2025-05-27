@@ -125,7 +125,8 @@ Ensure your final output is a single valid JSON object matching the schema, base
         }
     }
 
-    api_key = ""  # Gemini API key will be injected by the environment in Canvas
+    api_key = st.secrets["GEMINI_API_KEY"] # Assuming your secret is named GEMINI_API_KEY
+    # Gemini API key will be injected by the environment in Canvas
     api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={api_key}"
 
     try:
