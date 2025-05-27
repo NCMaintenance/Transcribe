@@ -1,102 +1,109 @@
 import streamlit as st
-from streamlit_js_eval import streamlit_js_eval
 import base64
 import tempfile
 import os
+import time
 import requests
 
-st.set_page_config(page_title="Dr. Scribe", page_icon="🩺")
-st.title("Dr. Scribe - Real-Time Audio Transcription (Gemini)")
+# Gemini API Key
+GEMINI_API_KEY = "YOUR_GEMINI_API_KEY"  # Replace with your actual key
 
-API_KEY = st.secrets["GEMINI_API_KEY"]
-GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent"
+st.set_page_config(page_title="Dr. Scribe")
+st.title("Dr. Scribe - Real-Time Audio Transcription")
 
-st.markdown("Click **Start Recording**, speak, then press **Stop** to transcribe.")
+# JavaScript Recorder Widget
+record_script = """
+<script>
+let mediaRecorder;
+let audioChunks = [];
 
-# JS audio recorder
-recorder = streamlit_js_eval(js_expressions="navigator.mediaDevices && 'MediaRecorder' in window", key="js_support")
+function startRecording() {
+    navigator.mediaDevices.getUserMedia({ audio: true })
+        .then(stream => {
+            mediaRecorder = new MediaRecorder(stream);
+            audioChunks = [];
+            mediaRecorder.ondataavailable = event => {
+                if (event.data.size > 0) {
+                    audioChunks.push(event.data);
+                }
+            };
+            mediaRecorder.onstop = () => {
+                const blob = new Blob(audioChunks, { type: 'audio/webm' });
+                const reader = new FileReader();
+                reader.onloadend = () => {
+                    const base64Audio = reader.result.split(',')[1];
+                    const input = document.getElementById('audio_data');
+                    input.value = base64Audio;
+                    input.dispatchEvent(new Event('change', { bubbles: true }));
+                };
+                reader.readAsDataURL(blob);
+            };
+            mediaRecorder.start();
+            document.getElementById("record-status").innerText = "Recording...";
+        });
+}
 
-if recorder:
-    js_code = """
-    let chunks = [];
-    let recorder;
-    let mediaStream;
+function stopRecording() {
+    if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+        mediaRecorder.stop();
+        document.getElementById("record-status").innerText = "Stopped";
+    }
+}
+</script>
 
-    const startRecording = async () => {
-        mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-        recorder = new MediaRecorder(mediaStream);
-        chunks = [];
+<button onclick="startRecording()">Record</button>
+<button onclick="stopRecording()">Stop & Transcribe</button>
+<p id="record-status">Idle</p>
+<input type="hidden" id="audio_data" name="audio_data" />
+"""
 
-        recorder.ondataavailable = e => chunks.push(e.data);
-        recorder.onstop = () => {
-            const blob = new Blob(chunks, { type: 'audio/wav' });
-            blob.arrayBuffer().then(buffer => {
-                const bytes = new Uint8Array(buffer);
-                const b64 = btoa(String.fromCharCode(...bytes));
-                const data = JSON.stringify({ audio: b64 });
-                window.parent.postMessage({ streamlitMessageType: "streamlit:customMessage", data: data }, "*");
-            });
-        };
+# Render JavaScript Recorder
+st.components.v1.html(record_script, height=180)
 
-        recorder.start();
-        window.recorder = recorder;
-    };
+# Receive audio from JS
+audio_data = st.text_input("Audio Base64", key="audio_data")
 
-    const stopRecording = () => {
-        if (window.recorder) {
-            window.recorder.stop();
-            mediaStream.getTracks().forEach(track => track.stop());
-        }
-    };
+if audio_data:
+    st.info("Processing audio...")
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".webm") as temp_audio_file:
+        temp_audio_file.write(base64.b64decode(audio_data))
+        temp_audio_path = temp_audio_file.name
 
-    window.startRecording = startRecording;
-    window.stopRecording = stopRecording;
-    """
-    st.components.v1.html(f"<script>{js_code}</script>", height=0)
+    # Transcribe using Gemini API
+    with open(temp_audio_path, "rb") as f:
+        audio_bytes = f.read()
 
-    col1, col2 = st.columns(2)
-    with col1:
-        if st.button("Start Recording"):
-            streamlit_js_eval(js_expressions="startRecording()", key="start_record")
-    with col2:
-        if st.button("Stop Recording"):
-            streamlit_js_eval(js_expressions="stopRecording()", key="stop_record")
+    gemini_api_url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent"
+    headers = {
+        "Content-Type": "application/json",
+        "x-goog-api-key": GEMINI_API_KEY,
+    }
 
-    audio_data = st.experimental_get_query_params().get("audio")
-    if audio_data:
-        audio_bytes = base64.b64decode(audio_data[0])
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
-            tmp.write(audio_bytes)
-            tmp_path = tmp.name
+    # Encode audio to base64 string to send to Gemini
+    audio_base64 = base64.b64encode(audio_bytes).decode("utf-8")
 
-        st.audio(audio_bytes, format="audio/wav")
-        st.info("Transcribing using Gemini...")
+    payload = {
+        "contents": [{
+            "parts": [
+                {"text": "Transcribe the following audio:"},
+                {"inline_data": {
+                    "mime_type": "audio/webm",
+                    "data": audio_base64
+                }}
+            ]
+        }]
+    }
 
-        with open(tmp_path, "rb") as audio_file:
-            audio_b64 = base64.b64encode(audio_file.read()).decode("utf-8")
-
-        # Gemini API prompt
-        headers = {"Content-Type": "application/json"}
-        payload = {
-            "contents": [{
-                "parts": [{
-                    "inline_data": {
-                        "mime_type": "audio/wav",
-                        "data": audio_b64
-                    }
-                }]
-            }]
-        }
-
-        response = requests.post(f"{GEMINI_URL}?key={API_KEY}", headers=headers, json=payload)
+    response = requests.post(gemini_api_url, headers=headers, json=payload)
+    if response.status_code == 200:
         result = response.json()
+        try:
+            transcript = result["candidates"][0]["content"]["parts"][0]["text"]
+            st.success("Transcription Complete")
+            st.text_area("Transcribed Text", transcript, height=200)
+        except Exception:
+            st.error("Failed to extract transcription.")
+    else:
+        st.error(f"Gemini API Error: {response.status_code}")
 
-        if "candidates" in result:
-            text = result["candidates"][0]["content"]["parts"][0]["text"]
-            st.success("Transcription complete!")
-            st.text_area("Transcribed Text", text, height=200)
-        else:
-            st.error("Transcription failed.")
-        os.remove(tmp_path)
-else:
-    st.error("Browser does not support audio recording.")
+    os.remove(temp_audio_path)
