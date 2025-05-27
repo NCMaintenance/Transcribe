@@ -1,85 +1,102 @@
 import streamlit as st
+from streamlit_js_eval import streamlit_js_eval
 import base64
-import io
 import tempfile
 import os
-import wave
-import numpy as np
-#from pydub import AudioSegment
-import whisper
+import requests
 
-from streamlit_js_eval import streamlit_js_eval
-import streamlit.components.v1 as components
+st.set_page_config(page_title="Dr. Scribe", page_icon="🩺")
+st.title("Dr. Scribe - Real-Time Audio Transcription (Gemini)")
 
-st.set_page_config(page_title="Dr. Scribe", layout="centered")
-st.title("Dr. Scribe: Audio Transcription")
+API_KEY = st.secrets["GEMINI_API_KEY"]
+GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent"
 
-# Load Whisper model
-model = whisper.load_model("base")
+st.markdown("Click **Start Recording**, speak, then press **Stop** to transcribe.")
 
-# JS/HTML Audio Recorder with start and stop buttons
-st.markdown("### Record Audio")
+# JS audio recorder
+recorder = streamlit_js_eval(js_expressions="navigator.mediaDevices && 'MediaRecorder' in window", key="js_support")
 
-components.html("""
-    <div>
-        <button onclick="startRecording()">Start Recording</button>
-        <button onclick="stopRecording()">Stop Recording</button>
-        <p id="status">Status: Idle</p>
-    </div>
-    <script>
-        let recorder;
-        let audioChunks;
+if recorder:
+    js_code = """
+    let chunks = [];
+    let recorder;
+    let mediaStream;
 
-        async function startRecording() {
-            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-            recorder = new MediaRecorder(stream);
-            audioChunks = [];
+    const startRecording = async () => {
+        mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        recorder = new MediaRecorder(mediaStream);
+        chunks = [];
 
-            recorder.ondataavailable = event => {
-                audioChunks.push(event.data);
-            };
+        recorder.ondataavailable = e => chunks.push(e.data);
+        recorder.onstop = () => {
+            const blob = new Blob(chunks, { type: 'audio/wav' });
+            blob.arrayBuffer().then(buffer => {
+                const bytes = new Uint8Array(buffer);
+                const b64 = btoa(String.fromCharCode(...bytes));
+                const data = JSON.stringify({ audio: b64 });
+                window.parent.postMessage({ streamlitMessageType: "streamlit:customMessage", data: data }, "*");
+            });
+        };
 
-            recorder.onstop = async () => {
-                const audioBlob = new Blob(audioChunks, { type: 'audio/wav' });
-                const reader = new FileReader();
-                reader.readAsDataURL(audioBlob);
-                reader.onloadend = function () {
-                    const base64Audio = reader.result.split(',')[1];
-                    window.parent.postMessage({ type: 'streamlit:setComponentValue', value: base64Audio }, '*');
-                    document.getElementById("status").innerText = "Status: Audio sent.";
-                };
-            };
+        recorder.start();
+        window.recorder = recorder;
+    };
 
-            recorder.start();
-            document.getElementById("status").innerText = "Status: Recording...";
+    const stopRecording = () => {
+        if (window.recorder) {
+            window.recorder.stop();
+            mediaStream.getTracks().forEach(track => track.stop());
+        }
+    };
+
+    window.startRecording = startRecording;
+    window.stopRecording = stopRecording;
+    """
+    st.components.v1.html(f"<script>{js_code}</script>", height=0)
+
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("Start Recording"):
+            streamlit_js_eval(js_expressions="startRecording()", key="start_record")
+    with col2:
+        if st.button("Stop Recording"):
+            streamlit_js_eval(js_expressions="stopRecording()", key="stop_record")
+
+    audio_data = st.experimental_get_query_params().get("audio")
+    if audio_data:
+        audio_bytes = base64.b64decode(audio_data[0])
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
+            tmp.write(audio_bytes)
+            tmp_path = tmp.name
+
+        st.audio(audio_bytes, format="audio/wav")
+        st.info("Transcribing using Gemini...")
+
+        with open(tmp_path, "rb") as audio_file:
+            audio_b64 = base64.b64encode(audio_file.read()).decode("utf-8")
+
+        # Gemini API prompt
+        headers = {"Content-Type": "application/json"}
+        payload = {
+            "contents": [{
+                "parts": [{
+                    "inline_data": {
+                        "mime_type": "audio/wav",
+                        "data": audio_b64
+                    }
+                }]
+            }]
         }
 
-        function stopRecording() {
-            recorder.stop();
-            document.getElementById("status").innerText = "Status: Stopped";
-        }
-    </script>
-""", height=150)
+        response = requests.post(f"{GEMINI_URL}?key={API_KEY}", headers=headers, json=payload)
+        result = response.json()
 
-# Receive audio from JS recorder
-audio_base64 = streamlit_js_eval(js_expressions="", key="audio_blob")
-
-if audio_base64:
-    audio_bytes = base64.b64decode(audio_base64)
-    audio_io = io.BytesIO(audio_bytes)
-
-    # Save audio to a WAV file
-    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
-        f.write(audio_bytes)
-        audio_path = f.name
-
-    st.audio(audio_io.read(), format="audio/wav")
-
-    # Transcription
-    st.info("Transcribing...")
-    result = model.transcribe(audio_path)
-    st.success("Transcription complete!")
-
-    st.text_area("Transcribed Text:", result["text"], height=250)
-
-    os.remove(audio_path)
+        if "candidates" in result:
+            text = result["candidates"][0]["content"]["parts"][0]["text"]
+            st.success("Transcription complete!")
+            st.text_area("Transcribed Text", text, height=200)
+        else:
+            st.error("Transcription failed.")
+        os.remove(tmp_path)
+else:
+    st.error("Browser does not support audio recording.")
