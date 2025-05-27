@@ -5,7 +5,7 @@ import tempfile
 import os
 import wave
 import numpy as np
-from pydub import AudioSegment
+#from pydub import AudioSegment
 import whisper
 
 from streamlit_js_eval import streamlit_js_eval
