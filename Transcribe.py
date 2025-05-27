@@ -1,12 +1,13 @@
 import streamlit as st
 import requests
 import json
+import base64 # For encoding audio data
 from datetime import datetime
 
 # --- Page Configuration ---
 st.set_page_config(
     page_title="Dr. Scribe",
-    page_icon="🩺",
+    page_icon="🎙️", # Changed icon
     layout="wide",
     initial_sidebar_state="collapsed"
 )
@@ -60,24 +61,62 @@ FRIENDLY_NAMES = {
     "followUp": "➡️ Follow-up Instructions"
 }
 
-# --- API Call Function ---
-def analyze_transcript_with_gemini(transcript_text):
-    """
-    Sends the transcript to Gemini API for analysis and structured summarization.
-    """
-    prompt = f"""
-      You are an expert medical scribe. Analyze the following doctor's transcript or patient notes.
-      Extract key information and structure it according to the provided JSON schema.
-      Focus on accurately capturing medical details for each section.
-      If information for a specific section is not present in the transcript, use "Not mentioned" or "N/A" for that field.
-      Ensure your response is a valid JSON object matching the schema.
+# Supported audio MIME types for upload and a basic mapping
+# Gemini supports more, but these are common for st.file_uploader
+# For inline data, Gemini supports WAV, MP3, AIFF, AAC, OGG Vorbis, FLAC.
+AUDIO_MIME_TYPES = {
+    "audio/wav": "wav",
+    "audio/mpeg": "mp3", # Covers mp3
+    "audio/ogg": "ogg", # Covers ogg vorbis
+    "audio/flac": "flac",
+    "audio/aac": "aac",
+    "audio/x-m4a": "m4a" # Common for Apple devices
+}
+# File extensions for the uploader
+ACCEPTED_AUDIO_EXTENSIONS = ["wav", "mp3", "ogg", "flac", "aac", "m4a"]
 
-      Transcript:
-      ---
-      {transcript_text}
-      ---
+
+# --- API Call Function ---
+def analyze_input_with_gemini(input_content, input_type="text", audio_mime_type=None):
     """
-    chat_history = [{"role": "user", "parts": [{"text": prompt}]}]
+    Sends the input (text or audio) to Gemini API for analysis and structured summarization.
+    For audio, it instructs Gemini to first transcribe, then summarize.
+    """
+    parts = []
+    if input_type == "text":
+        prompt = f"""
+          You are an expert medical scribe. Analyze the following doctor's transcript or patient notes.
+          Extract key information and structure it according to the provided JSON schema.
+          Focus on accurately capturing medical details for each section.
+          If information for a specific section is not present in the transcript, use "Not mentioned" or "N/A" for that field.
+          Ensure your response is a valid JSON object matching the schema.
+
+          Transcript:
+          ---
+          {input_content}
+          ---
+        """
+        parts.append({"text": prompt})
+    elif input_type == "audio" and audio_mime_type:
+        audio_prompt = """
+You are an expert medical scribe. The following audio contains a doctor's consultation or notes.
+1. First, accurately transcribe the spoken content in the audio.
+2. Then, using the full transcription, analyze the content and extract key information to structure it according to the provided JSON schema.
+Focus on accurately capturing medical details for each section of the schema from the transcribed text.
+If information for a specific section is not present in the transcribed text, use "Not mentioned" or "N/A" for that field.
+Ensure your final output is a single valid JSON object matching the schema, based on the transcribed audio content.
+        """
+        parts.append({"text": audio_prompt})
+        parts.append({
+            "inlineData": {
+                "mimeType": audio_mime_type,
+                "data": input_content # Expecting base64 encoded string here
+            }
+        })
+    else:
+        return None, "Invalid input type or missing audio MIME type."
+
+    chat_history = [{"role": "user", "parts": parts}]
     payload = {
         "contents": chat_history,
         "generationConfig": {
@@ -90,8 +129,8 @@ def analyze_transcript_with_gemini(transcript_text):
     api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={api_key}"
 
     try:
-        response = requests.post(api_url, headers={'Content-Type': 'application/json'}, json=payload, timeout=120) # Increased timeout
-        response.raise_for_status()  # Raises an HTTPError for bad responses (4XX or 5XX)
+        response = requests.post(api_url, headers={'Content-Type': 'application/json'}, json=payload, timeout=180) # Increased timeout for audio
+        response.raise_for_status()
         result = response.json()
 
         if (result.get("candidates") and
@@ -112,16 +151,15 @@ def analyze_transcript_with_gemini(transcript_text):
                 error_message += f" Block Reason: {result['promptFeedback']['blockReason']}."
                 if result["promptFeedback"].get("safetyRatings"):
                      error_message += f" Safety Ratings: {result['promptFeedback']['safetyRatings']}"
-
             st.error(f"Unexpected API response structure: {result}")
             return None, error_message
 
     except requests.exceptions.HTTPError as http_err:
         error_detail = f"HTTP error occurred: {http_err}."
         try:
-            error_content = response.json() # Try to get more details from response
-            error_detail += f" Response: {error_content}"
-        except ValueError: # If response is not JSON
+            error_content = response.json()
+            error_detail += f" Response: {error_content.get('error', {}).get('message', str(error_content))}"
+        except ValueError:
             error_detail += f" Response: {response.text}"
         st.error(error_detail)
         return None, error_detail
@@ -133,24 +171,28 @@ def analyze_transcript_with_gemini(transcript_text):
         return None, f"An unexpected error occurred: {e}"
 
 # --- Initialize Session State ---
-if 'transcript' not in st.session_state:
-    st.session_state.transcript = ""
+if 'transcript_text' not in st.session_state:
+    st.session_state.transcript_text = ""
+if 'uploaded_audio_file' not in st.session_state:
+    st.session_state.uploaded_audio_file = None
 if 'summary' not in st.session_state:
     st.session_state.summary = None
 if 'error' not in st.session_state:
     st.session_state.error = None
 if 'is_loading' not in st.session_state:
     st.session_state.is_loading = False
+if 'current_analysis_type' not in st.session_state: # To know what was analyzed
+    st.session_state.current_analysis_type = None
+
 
 # --- Custom CSS for Styling ---
 st.markdown("""
 <style>
     /* Main container styling */
     .stApp {
-        background: linear-gradient(to bottom right, #1a202c, #2d3748); /* Dark gradient background */
-        color: #e2e8f0; /* Light text color for contrast */
+        background: linear-gradient(to bottom right, #1a202c, #2d3748);
+        color: #e2e8f0;
     }
-
     /* Header styling */
     h1 {
         color: #63b3ed; /* Sky blue for main title */
@@ -160,21 +202,29 @@ st.markdown("""
     .subtitle {
         color: #90cdf4; /* Lighter blue for subtitle */
         text-align: center;
-        margin-bottom: 30px;
+        margin-bottom: 20px; /* Reduced margin */
     }
-
-    /* Text area styling */
+    /* Input sections */
+    .stTextArea textarea, .stFileUploader label {
+        color: #e2e8f0 !important; /* Ensure text is light */
+    }
     .stTextArea textarea {
-        background-color: #2d3748; /* Darker background for text area */
-        color: #e2e8f0; /* Light text */
-        border: 1px solid #4a5568; /* Subtle border */
+        background-color: #2d3748;
+        border: 1px solid #4a5568;
         border-radius: 8px;
-        min-height: 200px; /* Ensure decent height */
+        min-height: 150px; /* Adjusted height */
     }
-
+    .stFileUploader > div > button { /* Style the upload button */
+        background-color: #4a5568;
+        color: #e2e8f0;
+        border-radius: 8px;
+    }
+    .stFileUploader > div > div > p { /* Style the uploader text "Drag and drop file here" */
+        color: #a0aec0 !important;
+    }
     /* Button styling */
     .stButton button {
-        background-color: #4299e1; /* Blue button */
+        background-color: #4299e1;
         color: white;
         font-weight: bold;
         border-radius: 8px;
@@ -183,25 +233,24 @@ st.markdown("""
         transition: background-color 0.2s ease-in-out;
         display: block;
         margin-left: auto;
-        margin-right: auto; /* Center button */
+        margin-right: auto;
     }
     .stButton button:hover {
-        background-color: #3182ce; /* Darker blue on hover */
+        background-color: #3182ce;
     }
     .stButton button:disabled {
-        background-color: #718096; /* Gray out when disabled */
+        background-color: #718096;
         color: #a0aec0;
     }
-
     /* Summary section styling */
     .summary-section h2 {
         color: #63b3ed;
         border-bottom: 2px solid #4a5568;
         padding-bottom: 10px;
-        margin-top: 30px;
+        margin-top: 20px; /* Reduced margin */
     }
     .summary-item {
-        background-color: #2d3748; /* Slightly lighter than main bg */
+        background-color: #2d3748;
         padding: 15px;
         border-radius: 8px;
         margin-bottom: 15px;
@@ -209,82 +258,151 @@ st.markdown("""
         box-shadow: 0 2px 4px rgba(0,0,0,0.2);
     }
     .summary-item h3 {
-        color: #90cdf4; /* Lighter blue for item titles */
+        color: #90cdf4;
         margin-bottom: 8px;
         font-size: 1.1em;
     }
     .summary-item p {
-        color: #cbd5e0; /* Off-white for text */
-        white-space: pre-wrap; /* Preserve line breaks */
+        color: #cbd5e0;
+        white-space: pre-wrap;
         line-height: 1.6;
     }
     .summary-item .not-mentioned {
-        color: #718096; /* Gray for "Not mentioned" */
+        color: #718096;
         font-style: italic;
     }
-
     /* Footer styling */
     .footer {
         text-align: center;
-        margin-top: 40px;
+        margin-top: 30px; /* Reduced margin */
         padding-bottom: 20px;
-        color: #a0aec0; /* Muted color for footer */
+        color: #a0aec0;
         font-size: 0.9em;
     }
-
-    /* Error message styling */
-    .stAlert {
+    /* Info/Warning boxes */
+    .info-box {
+        background-color: #313a4f; /* Darker blue-gray */
+        color: #a0aec0;
+        padding: 10px 15px;
         border-radius: 8px;
+        margin-bottom: 15px;
+        font-size: 0.9em;
+        border-left: 4px solid #4299e1; /* Blue accent */
     }
 </style>
 """, unsafe_allow_html=True)
 
 
 # --- UI Layout ---
-st.markdown("<h1>Dr. Scribe 🩺</h1>", unsafe_allow_html=True)
-st.markdown("<p class='subtitle'>AI-Powered Medical Transcription Analysis</p>", unsafe_allow_html=True)
+st.markdown("<h1>Dr. Scribe 🎙️</h1>", unsafe_allow_html=True)
+st.markdown("<p class='subtitle'>AI-Powered Medical Transcription & Analysis</p>", unsafe_allow_html=True)
 
-# Input Section
-st.subheader("📝 Enter Transcript or Notes:")
-transcript_input = st.text_area(
-    label="Paste or type doctor's notes, patient conversation transcript, etc. here...",
-    value=st.session_state.transcript,
-    height=250,
-    key="transcript_input_area",
-    disabled=st.session_state.is_loading,
-    label_visibility="collapsed"
-)
-st.session_state.transcript = transcript_input # Keep session state updated
+# Input Method Selection (using columns for better layout)
+col1, col2 = st.columns(2)
 
-# Action Button
-analyze_button_col, _ = st.columns([1,3]) # To constrain button width a bit
-with analyze_button_col:
-    if st.button("🧠 Analyze Transcript", disabled=st.session_state.is_loading, use_container_width=True):
-        if not st.session_state.transcript.strip():
-            st.session_state.error = "Transcript cannot be empty."
-            st.session_state.summary = None
-        else:
-            st.session_state.is_loading = True
-            st.session_state.error = None
-            st.session_state.summary = None
-            with st.spinner("Analyzing transcript... This may take a moment."):
-                summary_data, error_data = analyze_transcript_with_gemini(st.session_state.transcript)
+with col1:
+    st.subheader("📝 Option 1: Enter Transcript Text")
+    transcript_text_input = st.text_area(
+        label="Paste or type doctor's notes, patient conversation transcript, etc. here...",
+        value=st.session_state.transcript_text,
+        height=200, # Increased height slightly
+        key="transcript_text_area",
+        disabled=st.session_state.is_loading,
+        label_visibility="collapsed"
+    )
+    # Update session state immediately after input
+    st.session_state.transcript_text = transcript_text_input
+
+
+with col2:
+    st.subheader("🎤 Option 2: Upload Audio File")
+    uploaded_audio = st.file_uploader(
+        "Upload an audio file (e.g., WAV, MP3, OGG, FLAC, AAC, M4A)",
+        type=ACCEPTED_AUDIO_EXTENSIONS,
+        key="audio_uploader",
+        disabled=st.session_state.is_loading,
+        accept_multiple_files=False
+    )
+    # Update session state immediately after upload
+    st.session_state.uploaded_audio_file = uploaded_audio
+
+    st.markdown("""
+    <div class="info-box">
+        <strong>Note on Audio Files:</strong>
+        <ul>
+            <li>For direct uploads, Gemini API typically supports audio up to <strong>1 minute or ~256KB</strong>.</li>
+            <li>Longer audio may require different processing methods not included here.</li>
+            <li>Ensure audio is clear for best transcription and analysis.</li>
+        </ul>
+    </div>
+    """, unsafe_allow_html=True)
+
+
+# Action Button - Centered
+button_col_spacer1, button_col, button_col_spacer2 = st.columns([1,1.5,1]) # Adjust ratio for centering
+with button_col:
+    if st.button("✨ Analyze Input", disabled=st.session_state.is_loading, use_container_width=True):
+        # Reset previous results
+        st.session_state.summary = None
+        st.session_state.error = None
+        st.session_state.is_loading = True
+        st.session_state.current_analysis_type = None
+
+        processed_input = False
+
+        # Prioritize audio file if provided
+        if st.session_state.uploaded_audio_file is not None:
+            st.session_state.current_analysis_type = "Audio"
+            audio_bytes = st.session_state.uploaded_audio_file.getvalue()
+            audio_base64 = base64.b64encode(audio_bytes).decode('utf-8')
+            
+            # Determine MIME type from file uploader
+            uploaded_mime_type = st.session_state.uploaded_audio_file.type
+            if uploaded_mime_type not in AUDIO_MIME_TYPES:
+                st.session_state.error = f"Unsupported audio file type: {uploaded_mime_type}. Please use one of {', '.join(AUDIO_MIME_TYPES.values())}."
+                st.session_state.is_loading = False
+            else:
+                with st.spinner(f"Analyzing uploaded audio file ({st.session_state.uploaded_audio_file.name})... This may take a moment."):
+                    summary_data, error_data = analyze_input_with_gemini(audio_base64, input_type="audio", audio_mime_type=uploaded_mime_type)
+                st.session_state.summary = summary_data
+                st.session_state.error = error_data
+                processed_input = True
+        
+        # If no audio, or if audio processing failed and user also entered text, process text
+        elif st.session_state.transcript_text.strip():
+            st.session_state.current_analysis_type = "Text"
+            with st.spinner("Analyzing transcript text..."):
+                summary_data, error_data = analyze_input_with_gemini(st.session_state.transcript_text, input_type="text")
             st.session_state.summary = summary_data
             st.session_state.error = error_data
-            st.session_state.is_loading = False
-            st.rerun() # Rerun to update UI based on new state
+            processed_input = True
+        
+        else: # No input provided
+            st.session_state.error = "Please enter a transcript or upload an audio file to analyze."
+            processed_input = False
+
+        st.session_state.is_loading = False
+        # Clear the uploaded file from session state after processing to avoid re-processing on rerun,
+        # but only if it was the source of analysis.
+        # Keep text in text_area.
+        if st.session_state.current_analysis_type == "Audio":
+             st.session_state.uploaded_audio_file = None # This will clear the uploader UI too via key
+        
+        st.rerun() # Rerun to update UI based on new state
+
 
 # Error Display
-if st.session_state.error:
+if st.session_state.error and not st.session_state.is_loading: # Only show error if not loading
     st.error(f"An error occurred: {st.session_state.error}")
 
 # Summary Display Section
 if st.session_state.summary and not st.session_state.is_loading:
-    st.markdown("<div class='summary-section'><h2>Structured Summary</h2></div>", unsafe_allow_html=True)
+    analysis_source_msg = f" (from {st.session_state.current_analysis_type})" if st.session_state.current_analysis_type else ""
+    st.markdown(f"<div class='summary-section'><h2>Structured Summary{analysis_source_msg}</h2></div>", unsafe_allow_html=True)
 
     for key in DISPLAY_ORDER:
-        value = st.session_state.summary.get(key) # Use .get for safety
-        if value is not None: # Check if key exists and has a value
+        value = st.session_state.summary.get(key)
+        if value is not None:
             display_name = FRIENDLY_NAMES.get(key, key.replace("([A-Z])", " $1").title())
             st.markdown(f"<div class='summary-item'><h3>{display_name}</h3>", unsafe_allow_html=True)
             if isinstance(value, str) and value.strip() and value.lower() not in ["not mentioned", "n/a", ""]:
@@ -292,11 +410,6 @@ if st.session_state.summary and not st.session_state.is_loading:
             else:
                 st.markdown("<p class='not-mentioned'>Not mentioned or N/A.</p>", unsafe_allow_html=True)
             st.markdown("</div>", unsafe_allow_html=True)
-        # else:
-            # If a required key is missing from the response, it might indicate an issue.
-            # For now, we just skip it. Could add a warning if a required field is missing.
-            # st.warning(f"Data for '{FRIENDLY_NAMES.get(key, key)}' was not found in the response.")
-
 
 # Footer
 st.markdown(f"""
