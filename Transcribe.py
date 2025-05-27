@@ -126,43 +126,65 @@ let stream;
 
 async function startRecording() {
     try {
+        console.log("Attempting to start recording...");
         document.getElementById("record-status").innerText = "Initializing microphone...";
         stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        console.log("Microphone stream obtained.");
         mediaRecorder = new MediaRecorder(stream, { mimeType: 'audio/webm' });
+        console.log("MediaRecorder initialized with mimeType: audio/webm");
         audioChunks = [];
 
         mediaRecorder.ondataavailable = event => {
             if (event.data.size > 0) {
                 audioChunks.push(event.data);
+                // console.log("Audio chunk received, size: " + event.data.size);
+            } else {
+                // console.log("Audio chunk received but size is 0.");
             }
         };
 
         mediaRecorder.onstop = () => {
+            console.log("MediaRecorder stopped.");
+            console.log("Number of audio chunks: " + audioChunks.length);
+            if (audioChunks.length > 0) {
+                console.log("Size of first audio chunk: " + (audioChunks[0] ? audioChunks[0].size : "N/A"));
+            }
+
             const blob = new Blob(audioChunks, { type: 'audio/webm' });
+            console.log("Blob created. Size: " + blob.size + ", Type: " + blob.type);
+
             const reader = new FileReader();
             reader.onloadend = () => {
+                console.log("FileReader onloadend triggered.");
+                // console.log("Raw reader.result (first 100 chars): " + (reader.result ? reader.result.toString().substring(0,100) : "null/undefined"));
+                
                 let base64Audio = ""; 
                 if (reader.result) {
-                    const parts = reader.result.toString().split(',');
+                    const resultString = reader.result.toString();
+                    const parts = resultString.split(',');
                     if (parts.length > 1) {
                         base64Audio = parts[1];
+                        // console.log("Base64 audio data extracted (first 50 chars): " + base64Audio.substring(0,50));
+                        // console.log("Base64 audio data length: " + base64Audio.length);
                     } else {
-                        console.warn("FileReader result did not contain comma, might be invalid Data URL format.");
+                        console.warn("FileReader result did not contain comma. Full result: ", resultString);
                     }
                 } else {
                      console.warn("FileReader result is null or undefined.");
                 }
+                
                 const input = document.getElementById('audio_data_input'); 
                 if (input) {
                     input.value = base64Audio; 
+                    console.log("Set input.value (length: " + base64Audio.length + "). Dispatching change event.");
                     input.dispatchEvent(new Event('change', { bubbles: true }));
                 } else {
                     console.error('Audio data input element not found');
                     document.getElementById("record-status").innerText = "Error: Could not send audio data to application.";
                 }
             };
-            reader.onerror = () => { 
-                console.error("FileReader error.");
+            reader.onerror = (error) => { 
+                console.error("FileReader error:", error);
                 document.getElementById("record-status").innerText = "Error: Could not read audio data.";
                 const input = document.getElementById('audio_data_input');
                 if (input) { 
@@ -170,10 +192,12 @@ async function startRecording() {
                     input.dispatchEvent(new Event('change', { bubbles: true }));
                 }
             };
+
             if (blob.size > 0) {
+                console.log("Blob size > 0, calling reader.readAsDataURL(blob)");
                 reader.readAsDataURL(blob);
             } else { 
-                 console.warn("Recorded audio blob is empty.");
+                 console.warn("Recorded audio blob is empty. Not calling readAsDataURL.");
                  document.getElementById("record-status").innerText = "Warning: Recording was empty or too short.";
                  const input = document.getElementById('audio_data_input');
                  if (input) {
@@ -184,10 +208,12 @@ async function startRecording() {
             
             if (stream) {
                 stream.getTracks().forEach(track => track.stop());
+                console.log("Microphone stream tracks stopped.");
             }
         };
 
         mediaRecorder.start();
+        console.log("MediaRecorder started.");
         document.getElementById("record-status").innerText = "Recording... Click 'Stop & Process' when done.";
         document.getElementById("start-record-btn").disabled = true;
         document.getElementById("stop-record-btn").disabled = false;
@@ -208,19 +234,20 @@ async function startRecording() {
 }
 
 function stopRecording() {
+    console.log("Stop recording button clicked.");
     if (mediaRecorder && mediaRecorder.state !== 'inactive') {
-        mediaRecorder.stop();
-        document.getElementById("record-status").innerText = "Processing audio... Please wait.";
-        document.getElementById("start-record-btn").disabled = false; 
-        document.getElementById("stop-record-btn").disabled = true;
+        mediaRecorder.stop(); // This will trigger mediaRecorder.onstop
     } else {
+        console.warn("Stop clicked but mediaRecorder not active or not initialized.");
         document.getElementById("record-status").innerText = "Idle. Click 'Start Recording'.";
         document.getElementById("start-record-btn").disabled = false;
         document.getElementById("stop-record-btn").disabled = true;
     }
+    // Moved status update to onstop or error handlers for more accuracy
 }
 
 window.onload = () => {
+    console.log("Window loaded. Initializing button states.");
     const startBtn = document.getElementById("start-record-btn");
     const stopBtn = document.getElementById("stop-record-btn");
     if (startBtn) startBtn.disabled = false;
@@ -384,7 +411,7 @@ if uploaded_file is not None:
 
         if extracted_text_from_file:
             with st.expander("View Extracted Text (First 1000 characters)", expanded=False):
-                st.text(extracted_text_from_file[:1000] + "..." if len(extracted_text_from_file) > 1000 else extracted_text_from_file) # Corrected line
+                st.text(extracted_text_from_file[:1000] + "..." if len(extracted_text_from_file) > 1000 else extracted_text_from_file) 
 
         if st.button("Extract Information from Uploaded File", key="extract_file_btn"):
             st.session_state.extracted_file_info = "" 
