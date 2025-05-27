@@ -1,61 +1,85 @@
 import streamlit as st
-from streamlit_webrtc import webrtc_streamer, WebRtcMode, ClientSettings
-import av
-import whisper
-import numpy as np
-import queue
+import base64
+import io
 import tempfile
 import os
 import wave
+import numpy as np
+from pydub import AudioSegment
+import whisper
 
-st.title("Real-Time Audio Transcription")
+from streamlit_js_eval import streamlit_js_eval
+import streamlit.components.v1 as components
 
+st.set_page_config(page_title="Dr. Scribe", layout="centered")
+st.title("Dr. Scribe: Audio Transcription")
+
+# Load Whisper model
 model = whisper.load_model("base")
 
-audio_queue = queue.Queue()
+# JS/HTML Audio Recorder with start and stop buttons
+st.markdown("### Record Audio")
 
-# Define audio processor class
-class AudioProcessor:
-    def __init__(self):
-        self.frames = []
+components.html("""
+    <div>
+        <button onclick="startRecording()">Start Recording</button>
+        <button onclick="stopRecording()">Stop Recording</button>
+        <p id="status">Status: Idle</p>
+    </div>
+    <script>
+        let recorder;
+        let audioChunks;
 
-    def recv(self, frame: av.AudioFrame) -> av.AudioFrame:
-        audio = frame.to_ndarray().flatten().astype(np.int16)
-        audio_queue.put(audio.tobytes())
-        return frame
+        async function startRecording() {
+            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            recorder = new MediaRecorder(stream);
+            audioChunks = [];
 
-# WebRTC settings
-webrtc_streamer(
-    key="audio",
-    mode=WebRtcMode.SENDONLY,
-    in_audio=True,
-    audio_processor_factory=AudioProcessor,
-    client_settings=ClientSettings(
-        media_stream_constraints={"video": False, "audio": True},
-        rtc_configuration={"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
-    )
-)
+            recorder.ondataavailable = event => {
+                audioChunks.push(event.data);
+            };
 
-# Button to trigger transcription
-if st.button("Transcribe"):
-    st.info("Processing audio...")
+            recorder.onstop = async () => {
+                const audioBlob = new Blob(audioChunks, { type: 'audio/wav' });
+                const reader = new FileReader();
+                reader.readAsDataURL(audioBlob);
+                reader.onloadend = function () {
+                    const base64Audio = reader.result.split(',')[1];
+                    window.parent.postMessage({ type: 'streamlit:setComponentValue', value: base64Audio }, '*');
+                    document.getElementById("status").innerText = "Status: Audio sent.";
+                };
+            };
 
-    # Write audio to temp WAV file
+            recorder.start();
+            document.getElementById("status").innerText = "Status: Recording...";
+        }
+
+        function stopRecording() {
+            recorder.stop();
+            document.getElementById("status").innerText = "Status: Stopped";
+        }
+    </script>
+""", height=150)
+
+# Receive audio from JS recorder
+audio_base64 = streamlit_js_eval(js_expressions="", key="audio_blob")
+
+if audio_base64:
+    audio_bytes = base64.b64decode(audio_base64)
+    audio_io = io.BytesIO(audio_bytes)
+
+    # Save audio to a WAV file
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
-        wf = wave.open(f, 'wb')
-        wf.setnchannels(1)
-        wf.setsampwidth(2)
-        wf.setframerate(44100)
-
-        while not audio_queue.empty():
-            wf.writeframes(audio_queue.get())
-        wf.close()
+        f.write(audio_bytes)
         audio_path = f.name
 
-    # Transcribe with Whisper
+    st.audio(audio_io.read(), format="audio/wav")
+
+    # Transcription
+    st.info("Transcribing...")
     result = model.transcribe(audio_path)
     st.success("Transcription complete!")
-    st.text_area("Transcribed Text:", result["text"], height=200)
 
-    # Clean up
+    st.text_area("Transcribed Text:", result["text"], height=250)
+
     os.remove(audio_path)
