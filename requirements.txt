@@ -1,9 +1,6 @@
 streamlit
-Pillow
-requests
-pydub
-SpeechRecognition
-openai
-streamlit-audiorecorder
-streamlit-extras
-python-dotenv
+streamlit-webrtc
+av
+numpy
+openai-whisper
+torch
