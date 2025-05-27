@@ -1,3 +1,9 @@
 streamlit
 Pillow
 requests
+pydub
+SpeechRecognition
+openai
+streamlit-audiorecorder
+streamlit-extras
+python-dotenv
