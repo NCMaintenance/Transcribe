@@ -384,4 +384,95 @@ if uploaded_file is not None:
 
         if extracted_text_from_file:
             with st.expander("View Extracted Text (First 1000 characters)", expanded=False):
-                st.text(extracted_text_from_file[:1000] + "..." if len(extracted_text_from_fi
+                st.text(extracted_text_from_file[:1000] + "..." if len(extracted_text_from_file) > 1000 else extracted_text_from_file) # Corrected line
+
+        if st.button("Extract Information from Uploaded File", key="extract_file_btn"):
+            st.session_state.extracted_file_info = "" 
+            analysis_result_text = None
+            if extracted_text_from_file:
+                with st.spinner("Analyzing extracted text with Gemini..."):
+                    extraction_prompt = (
+                        "Analyze the following medical text. Extract key information and present it in a structured format. "
+                        "Identify and list: \n"
+                        "1. PATIENT DETAILS: Patient name, date of birth (DOB), age, gender, contact information, patient identifiers.\n"
+                        "2. REFERRING DOCTOR/CLINIC (if applicable): Name and contact if mentioned.\n"
+                        "3. DATE OF DOCUMENT: The date the document was created.\n"
+                        "4. CHIEF COMPLAINT/REASON FOR DOCUMENT: The main reason for the note or visit.\n"
+                        "5. KEY MEDICAL HISTORY: Significant past illnesses, conditions, surgeries.\n"
+                        "6. CURRENT MEDICATIONS & ALLERGIES (if mentioned).\n"
+                        "7. SUMMARY OF ASSESSMENT/FINDINGS: Key observations, diagnoses, or conclusions from the note.\n"
+                        "8. RECOMMENDED PLAN/ACTIONS: Any treatments, follow-ups, or recommendations.\n\n"
+                        "If specific information is not found, indicate 'Not found' or 'N/A' for that section. "
+                        "Focus on clarity and organization.\n\n"
+                        "Document Content:\n"
+                        f"{extracted_text_from_file}"
+                    )
+                    analysis_payload = {"contents": [{"parts": [{"text": extraction_prompt}]}]}
+                    analysis_result_json = call_gemini_api(analysis_payload)
+                    if analysis_result_json:
+                        analysis_result_text = extract_text_from_gemini_response(analysis_result_json)
+
+            elif image_base64_for_gemini:
+                with st.spinner("Analyzing image with Gemini... (This may take a moment)"):
+                    image_analysis_prompt = (
+                        "You are an AI assistant specialized in extracting information from medical documents presented as images. "
+                        "Analyze the following image of a medical letter or note. First, perform Optical Character Recognition (OCR) to read all visible text. "
+                        "Then, based on the recognized text, extract key information and present it in a structured format. "
+                        "Identify and list: \n"
+                        "1. PATIENT DETAILS: Patient name, DOB, age, gender, contact, identifiers.\n"
+                        "2. REFERRING DOCTOR/CLINIC.\n"
+                        "3. DATE OF DOCUMENT.\n"
+                        "4. CHIEF COMPLAINT/REASON FOR DOCUMENT.\n"
+                        "5. KEY MEDICAL HISTORY.\n"
+                        "6. CURRENT MEDICATIONS & ALLERGIES.\n"
+                        "7. SUMMARY OF ASSESSMENT/FINDINGS.\n"
+                        "8. RECOMMENDED PLAN/ACTIONS.\n\n"
+                        "If text is unclear or unreadable in parts of the image, note this. "
+                        "If specific information is not found, indicate 'Not found' or 'N/A'. "
+                        "Output should be well-organized.\n\n"
+                        "Begin analysis of the provided image."
+                    )
+                    analysis_payload = {
+                        "contents": [{
+                            "parts": [
+                                {"text": image_analysis_prompt},
+                                {"inline_data": {
+                                    "mime_type": file_mime_type_for_gemini,
+                                    "data": image_base64_for_gemini
+                                }}
+                            ]
+                        }]
+                    }
+                    analysis_result_json = call_gemini_api(analysis_payload)
+                    if analysis_result_json:
+                        analysis_result_text = extract_text_from_gemini_response(analysis_result_json)
+            else:
+                st.warning("No content (text or image) available to analyze. Please upload a valid file and ensure text could be extracted if it's a PDF.")
+
+            if analysis_result_text:
+                st.session_state.extracted_file_info = analysis_result_text
+            elif extracted_text_from_file or image_base64_for_gemini: # Only show error if an attempt was made
+                st.error("Failed to get a response from Gemini for file analysis, or no text was extracted from the response.")
+                st.session_state.extracted_file_info = "Error: Analysis failed."
+            # If no content was available, no error message is needed here as warning was already shown.
+
+    except Exception as e:
+        st.error(f"An unexpected error occurred while processing the uploaded file: {e}")
+        st.exception(e)
+        st.session_state.extracted_file_info = "Error: File processing error."
+
+# --- Display Extracted File Info ---
+if st.session_state.extracted_file_info:
+    st.subheader("Extracted Information from Uploaded File")
+    st.text_area("Extracted Details", st.session_state.extracted_file_info, height=400, key="displayed_extracted_file_info")
+
+
+st.markdown("---")
+st.markdown("Developed with Gemini & Streamlit.")
+
+# To run this app:
+# 1. Save as a Python file (e.g., dr_scribe_app.py)
+# 2. Install dependencies: pip install streamlit requests pdfplumber Pillow
+# 3. Run from your terminal: streamlit run dr_scribe_app.py
+# 4. Configure GEMINI_API_KEY as per instructions at the top of the app.
+
