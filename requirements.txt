@@ -3,4 +3,4 @@ streamlit-js-eval
 pdfplumber
 transformers
 docx
-exception
+python-docx
