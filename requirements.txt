@@ -5,11 +5,6 @@ st-audiorec==0.1.2
 openai-whisper
 torch
 torchaudio
-pyannote.audio==3.1.1
-pyannote.core==5.0.0
-pyannote.database==5.1.0
-pyannote.metrics==5.0.2
-pyannote.pipeline==3.0.1
 scipy==1.13.0
 pyyaml==6.0.1
 huggingface-hub
