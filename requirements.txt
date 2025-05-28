@@ -2,3 +2,4 @@ streamlit
 streamlit-js-eval
 pdfplumber
 transformers
+docx
