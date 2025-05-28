@@ -1,5 +1,4 @@
 streamlit
-requests
 python-docx
 st-audiorec
 google-generativeai
