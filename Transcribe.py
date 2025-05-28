@@ -128,7 +128,7 @@ def get_doctors_narrative_summary_from_gemini(transcript_text):
     """
     chat_history = [{"role": "user", "parts": [{"text": prompt}]}]
     payload = {"contents": chat_history} # No responseSchema for plain text
-    api_key = ""  # Injected by Canvas
+    api_key = st.secrets["GEMINI_API_KEY"]  # Injected by Canvas
     api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={api_key}"
 
     try:
