@@ -2,3 +2,4 @@ streamlit
 requests
 python-docx
 torch
+streamlit-audiorec
