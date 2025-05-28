@@ -1,21 +1,24 @@
 import streamlit as st
 import requests
 import json
-import base64 # For encoding audio data
 from datetime import datetime
+import io # For in-memory file handling
+from docx import Document # For Word documents
+from docx.shared import Pt
+from fpdf import FPDF # For PDF documents
 
 # --- Page Configuration ---
 st.set_page_config(
     page_title="Dr. Scribe",
-    page_icon="🎙️", # Changed icon
+    page_icon="🩺",
     layout="wide",
     initial_sidebar_state="collapsed"
 )
 
 # --- Helper Functions & Constants ---
 
-# Define the expected JSON schema for the Gemini API response
-SUMMARY_SCHEMA = {
+# Define the expected JSON schema for the Gemini API response (for structured summary)
+STRUCTURED_SUMMARY_SCHEMA = {
     "type": "OBJECT",
     "properties": {
       "patientName": { "type": "STRING", "description": "Patient's full name, if mentioned. Otherwise, 'Not mentioned'." },
@@ -61,348 +64,232 @@ FRIENDLY_NAMES = {
     "followUp": "➡️ Follow-up Instructions"
 }
 
-# Supported audio MIME types for upload and a basic mapping
-# Gemini supports more, but these are common for st.file_uploader
-# For inline data, Gemini supports WAV, MP3, AIFF, AAC, OGG Vorbis, FLAC.
-AUDIO_MIME_TYPES = {
-    "audio/wav": "wav",
-    "audio/mpeg": "mp3", # Covers mp3
-    "audio/ogg": "ogg", # Covers ogg vorbis
-    "audio/flac": "flac",
-    "audio/aac": "aac",
-    "audio/x-m4a": "m4a" # Common for Apple devices
-}
-# File extensions for the uploader
-ACCEPTED_AUDIO_EXTENSIONS = ["wav", "mp3", "ogg", "flac", "aac", "m4a"]
-
-
-# --- API Call Function ---
-def analyze_input_with_gemini(input_content, input_type="text", audio_mime_type=None):
+# --- API Call Functions ---
+def get_structured_summary_from_gemini(transcript_text):
     """
-    Sends the input (text or audio) to Gemini API for analysis and structured summarization.
-    For audio, it instructs Gemini to first transcribe, then summarize.
+    Sends the transcript to Gemini API for structured summarization.
     """
-    parts = []
-    if input_type == "text":
-        prompt = f"""
-          You are an expert medical scribe. Analyze the following doctor's transcript or patient notes.
-          Extract key information and structure it according to the provided JSON schema.
-          Focus on accurately capturing medical details for each section.
-          If information for a specific section is not present in the transcript, use "Not mentioned" or "N/A" for that field.
-          Ensure your response is a valid JSON object matching the schema.
+    prompt = f"""
+      You are an expert medical scribe. Analyze the following doctor's transcript or patient notes.
+      Extract key information and structure it according to the provided JSON schema.
+      Focus on accurately capturing medical details for each section.
+      If information for a specific section is not present in the transcript, use "Not mentioned" or "N/A" for that field.
+      Ensure your response is a valid JSON object matching the schema.
 
-          Transcript:
-          ---
-          {input_content}
-          ---
-        """
-        parts.append({"text": prompt})
-    elif input_type == "audio" and audio_mime_type:
-        audio_prompt = """
-You are an expert medical scribe. The following audio contains a doctor's consultation or notes.
-1. First, accurately transcribe the spoken content in the audio.
-2. Then, using the full transcription, analyze the content and extract key information to structure it according to the provided JSON schema.
-Focus on accurately capturing medical details for each section of the schema from the transcribed text.
-If information for a specific section is not present in the transcribed text, use "Not mentioned" or "N/A" for that field.
-Ensure your final output is a single valid JSON object matching the schema, based on the transcribed audio content.
-        """
-        parts.append({"text": audio_prompt})
-        parts.append({
-            "inlineData": {
-                "mimeType": audio_mime_type,
-                "data": input_content # Expecting base64 encoded string here
-            }
-        })
-    else:
-        return None, "Invalid input type or missing audio MIME type."
-
-    chat_history = [{"role": "user", "parts": parts}]
+      Transcript:
+      ---
+      {transcript_text}
+      ---
+    """
+    chat_history = [{"role": "user", "parts": [{"text": prompt}]}]
     payload = {
         "contents": chat_history,
         "generationConfig": {
             "responseMimeType": "application/json",
-            "responseSchema": SUMMARY_SCHEMA,
+            "responseSchema": STRUCTURED_SUMMARY_SCHEMA,
         }
     }
-
-    api_key = st.secrets["GEMINI_API_KEY"] # Assuming your secret is named GEMINI_API_KEY
-    # Gemini API key will be injected by the environment in Canvas
+    api_key = ""  # Injected by Canvas
     api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={api_key}"
 
     try:
-        response = requests.post(api_url, headers={'Content-Type': 'application/json'}, json=payload, timeout=180) # Increased timeout for audio
+        response = requests.post(api_url, headers={'Content-Type': 'application/json'}, json=payload, timeout=120)
         response.raise_for_status()
         result = response.json()
-
-        if (result.get("candidates") and
-            result["candidates"][0].get("content") and
-            result["candidates"][0]["content"].get("parts") and
-            result["candidates"][0]["content"]["parts"][0].get("text")):
+        if (result.get("candidates") and result["candidates"][0].get("content") and
+            result["candidates"][0]["content"].get("parts") and result["candidates"][0]["content"]["parts"][0].get("text")):
             json_text = result["candidates"][0]["content"]["parts"][0]["text"]
             try:
-                parsed_json = json.loads(json_text)
-                return parsed_json, None  # Summary, Error
+                return json.loads(json_text), None
             except json.JSONDecodeError as e:
-                st.error(f"Failed to parse JSON response: {e}")
-                st.text_area("Raw AI Response (for debugging):", value=json_text, height=150)
-                return None, f"Failed to parse the summary from AI: {e}. Raw response: {json_text[:500]}..."
+                return None, f"Failed to parse JSON from AI: {e}. Raw: {json_text[:200]}..."
         else:
-            error_message = "Received an unexpected response structure from the AI."
-            if result.get("promptFeedback") and result["promptFeedback"].get("blockReason"):
-                error_message += f" Block Reason: {result['promptFeedback']['blockReason']}."
-                if result["promptFeedback"].get("safetyRatings"):
-                     error_message += f" Safety Ratings: {result['promptFeedback']['safetyRatings']}"
-            st.error(f"Unexpected API response structure: {result}")
-            return None, error_message
+            return None, f"Unexpected API response structure: {result.get('promptFeedback', result)}"
+    except requests.exceptions.RequestException as e:
+        return None, f"API request failed: {e}"
 
-    except requests.exceptions.HTTPError as http_err:
-        error_detail = f"HTTP error occurred: {http_err}."
-        try:
-            error_content = response.json()
-            error_detail += f" Response: {error_content.get('error', {}).get('message', str(error_content))}"
-        except ValueError:
-            error_detail += f" Response: {response.text}"
-        st.error(error_detail)
-        return None, error_detail
-    except requests.exceptions.RequestException as req_err:
-        st.error(f"Request error occurred: {req_err}")
-        return None, f"A network or request error occurred: {req_err}"
-    except Exception as e:
-        st.error(f"An unexpected error occurred: {e}")
-        return None, f"An unexpected error occurred: {e}"
+def get_doctors_narrative_summary_from_gemini(transcript_text):
+    """
+    Sends the transcript to Gemini API for a narrative summary in doctor's terms.
+    """
+    prompt = f"""
+      You are an expert medical AI. Analyze the following doctor's transcript or patient notes.
+      Generate a concise, narrative summary of the consultation suitable for a doctor's review.
+      The summary should be in prose, use appropriate medical terminology, and highlight clinically relevant information,
+      including chief complaint, pertinent history, key examination findings, assessment/diagnosis, and the treatment plan.
+      Do NOT use a JSON structure for this summary. Provide a plain text narrative.
+
+      Transcript:
+      ---
+      {transcript_text}
+      ---
+
+      Doctor's Narrative Summary:
+    """
+    chat_history = [{"role": "user", "parts": [{"text": prompt}]}]
+    payload = {"contents": chat_history} # No responseSchema for plain text
+    api_key = ""  # Injected by Canvas
+    api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={api_key}"
+
+    try:
+        response = requests.post(api_url, headers={'Content-Type': 'application/json'}, json=payload, timeout=120)
+        response.raise_for_status()
+        result = response.json()
+        if (result.get("candidates") and result["candidates"][0].get("content") and
+            result["candidates"][0]["content"].get("parts") and result["candidates"][0]["content"]["parts"][0].get("text")):
+            return result["candidates"][0]["content"]["parts"][0]["text"], None
+        else:
+            return None, f"Unexpected API response for narrative summary: {result.get('promptFeedback', result)}"
+    except requests.exceptions.RequestException as e:
+        return None, f"API request for narrative summary failed: {e}"
+
+# --- Download Generation Functions ---
+def create_docx_from_structured_summary(summary_data):
+    doc = Document()
+    doc.add_heading('Structured Medical Summary', level=1)
+    for key in DISPLAY_ORDER:
+        value = summary_data.get(key, "Not mentioned or N/A.")
+        friendly_name = FRIENDLY_NAMES.get(key, key.replace("([A-Z])", " $1").title())
+        doc.add_heading(friendly_name, level=2)
+        doc.add_paragraph(str(value) if value else "Not mentioned or N/A.")
+    
+    bio = io.BytesIO()
+    doc.save(bio)
+    bio.seek(0)
+    return bio.getvalue()
+
+def create_pdf_from_structured_summary(summary_data):
+    pdf = FPDF()
+    pdf.add_page()
+    pdf.set_auto_page_break(auto=True, margin=15)
+    pdf.add_font("DejaVu", "", "DejaVuSansCondensed.ttf", uni=True) # Ensure font is available or use standard
+    pdf.set_font("DejaVu", size=16) # Use a font that supports more characters
+    
+    pdf.cell(0, 10, 'Structured Medical Summary', ln=True, align='C', border=1)
+    pdf.ln(5)
+
+    for key in DISPLAY_ORDER:
+        value = summary_data.get(key, "Not mentioned or N/A.")
+        friendly_name = FRIENDLY_NAMES.get(key, key.replace("([A-Z])", " $1").title())
+        
+        pdf.set_font("DejaVu", 'B', size=12)
+        pdf.multi_cell(0, 7, friendly_name, ln=True)
+        pdf.set_font("DejaVu", size=10)
+        pdf.multi_cell(0, 7, str(value) if value else "Not mentioned or N/A.", ln=True)
+        pdf.ln(3)
+        
+    bio = io.BytesIO()
+    pdf.output(bio) # FPDF outputs to BytesIO directly if name is not a string path
+    bio.seek(0)
+    return bio.getvalue()
+
+
+def create_docx_from_narrative_summary(narrative_text):
+    doc = Document()
+    doc.add_heading("Doctor's Narrative Summary", level=1)
+    doc.add_paragraph(narrative_text)
+    bio = io.BytesIO()
+    doc.save(bio)
+    bio.seek(0)
+    return bio.getvalue()
+
+def create_pdf_from_narrative_summary(narrative_text):
+    pdf = FPDF()
+    pdf.add_page()
+    pdf.set_auto_page_break(auto=True, margin=15)
+    pdf.add_font("DejaVu", "", "DejaVuSansCondensed.ttf", uni=True)
+    pdf.set_font("DejaVu", size=16)
+    pdf.cell(0, 10, "Doctor's Narrative Summary", ln=True, align='C', border=1)
+    pdf.ln(5)
+    pdf.set_font("DejaVu", size=10)
+    pdf.multi_cell(0, 7, narrative_text, ln=True)
+    bio = io.BytesIO()
+    pdf.output(bio)
+    bio.seek(0)
+    return bio.getvalue()
+
 
 # --- Initialize Session State ---
 if 'transcript_text' not in st.session_state:
     st.session_state.transcript_text = ""
-if 'uploaded_audio_file' not in st.session_state:
-    st.session_state.uploaded_audio_file = None
-if 'summary' not in st.session_state:
-    st.session_state.summary = None
+if 'structured_summary' not in st.session_state:
+    st.session_state.structured_summary = None
+if 'doctors_narrative_summary' not in st.session_state:
+    st.session_state.doctors_narrative_summary = None
 if 'error' not in st.session_state:
     st.session_state.error = None
-if 'is_loading' not in st.session_state:
-    st.session_state.is_loading = False
-if 'current_analysis_type' not in st.session_state: # To know what was analyzed
-    st.session_state.current_analysis_type = None
+if 'is_loading_structured' not in st.session_state:
+    st.session_state.is_loading_structured = False
+if 'is_loading_narrative' not in st.session_state:
+    st.session_state.is_loading_narrative = False
 
-
-# --- Custom CSS for Styling ---
+# --- Custom CSS (similar to previous) ---
 st.markdown("""
 <style>
-    /* Main container styling */
-    .stApp {
-        background: linear-gradient(to bottom right, #1a202c, #2d3748);
-        color: #e2e8f0;
-    }
-    /* Header styling */
-    h1 {
-        color: #63b3ed; /* Sky blue for main title */
-        text-align: center;
-        padding-top: 20px;
-    }
-    .subtitle {
-        color: #90cdf4; /* Lighter blue for subtitle */
-        text-align: center;
-        margin-bottom: 20px; /* Reduced margin */
-    }
-    /* Input sections */
-    .stTextArea textarea, .stFileUploader label {
-        color: #e2e8f0 !important; /* Ensure text is light */
-    }
-    .stTextArea textarea {
-        background-color: #2d3748;
-        border: 1px solid #4a5568;
-        border-radius: 8px;
-        min-height: 150px; /* Adjusted height */
-    }
-    .stFileUploader > div > button { /* Style the upload button */
-        background-color: #4a5568;
-        color: #e2e8f0;
-        border-radius: 8px;
-    }
-    .stFileUploader > div > div > p { /* Style the uploader text "Drag and drop file here" */
-        color: #a0aec0 !important;
-    }
-    /* Button styling */
-    .stButton button {
-        background-color: #4299e1;
-        color: white;
-        font-weight: bold;
-        border-radius: 8px;
-        padding: 10px 20px;
-        border: none;
-        transition: background-color 0.2s ease-in-out;
-        display: block;
-        margin-left: auto;
-        margin-right: auto;
-    }
-    .stButton button:hover {
-        background-color: #3182ce;
-    }
-    .stButton button:disabled {
-        background-color: #718096;
-        color: #a0aec0;
-    }
-    /* Summary section styling */
-    .summary-section h2 {
-        color: #63b3ed;
-        border-bottom: 2px solid #4a5568;
-        padding-bottom: 10px;
-        margin-top: 20px; /* Reduced margin */
-    }
-    .summary-item {
-        background-color: #2d3748;
-        padding: 15px;
-        border-radius: 8px;
-        margin-bottom: 15px;
-        border: 1px solid #4a5568;
-        box-shadow: 0 2px 4px rgba(0,0,0,0.2);
-    }
-    .summary-item h3 {
-        color: #90cdf4;
-        margin-bottom: 8px;
-        font-size: 1.1em;
-    }
-    .summary-item p {
-        color: #cbd5e0;
-        white-space: pre-wrap;
-        line-height: 1.6;
-    }
-    .summary-item .not-mentioned {
-        color: #718096;
-        font-style: italic;
-    }
-    /* Footer styling */
-    .footer {
-        text-align: center;
-        margin-top: 30px; /* Reduced margin */
-        padding-bottom: 20px;
-        color: #a0aec0;
-        font-size: 0.9em;
-    }
-    /* Info/Warning boxes */
-    .info-box {
-        background-color: #313a4f; /* Darker blue-gray */
-        color: #a0aec0;
-        padding: 10px 15px;
-        border-radius: 8px;
-        margin-bottom: 15px;
-        font-size: 0.9em;
-        border-left: 4px solid #4299e1; /* Blue accent */
-    }
+    .stApp { background: linear-gradient(to bottom right, #1a202c, #2d3748); color: #e2e8f0; }
+    h1 { color: #63b3ed; text-align: center; padding-top: 20px; }
+    .subtitle { color: #90cdf4; text-align: center; margin-bottom: 30px; }
+    .stTextArea textarea { background-color: #2d3748; color: #e2e8f0; border: 1px solid #4a5568; border-radius: 8px; min-height: 200px; }
+    .stButton button { background-color: #4299e1; color: white; font-weight: bold; border-radius: 8px; padding: 10px 20px; border: none; transition: background-color 0.2s; }
+    .stButton button:hover { background-color: #3182ce; }
+    .stButton button:disabled { background-color: #718096; color: #a0aec0; }
+    .summary-section h2, .narrative-summary-section h2 { color: #63b3ed; border-bottom: 2px solid #4a5568; padding-bottom: 10px; margin-top: 30px; }
+    .summary-item, .narrative-summary-content { background-color: #2d3748; padding: 15px; border-radius: 8px; margin-bottom: 15px; border: 1px solid #4a5568; box-shadow: 0 2px 4px rgba(0,0,0,0.2); }
+    .summary-item h3 { color: #90cdf4; margin-bottom: 8px; font-size: 1.1em; }
+    .summary-item p, .narrative-summary-content p { color: #cbd5e0; white-space: pre-wrap; line-height: 1.6; }
+    .summary-item .not-mentioned { color: #718096; font-style: italic; }
+    .download-buttons-container { margin-top: 15px; margin-bottom:15px; display: flex; gap: 10px; }
+    .footer { text-align: center; margin-top: 40px; padding-bottom: 20px; color: #a0aec0; font-size: 0.9em; }
 </style>
 """, unsafe_allow_html=True)
 
-
 # --- UI Layout ---
-st.markdown("<h1>Dr. Scribe 🎙️</h1>", unsafe_allow_html=True)
-st.markdown("<p class='subtitle'>AI-Powered Medical Transcription & Analysis</p>", unsafe_allow_html=True)
+st.markdown("<h1>Dr. Scribe 🩺</h1>", unsafe_allow_html=True)
+st.markdown("<p class='subtitle'>AI-Powered Medical Transcription Analysis & Summarization</p>", unsafe_allow_html=True)
 
-# Input Method Selection (using columns for better layout)
-col1, col2 = st.columns(2)
+# Input Section
+st.subheader("📝 Enter Transcript or Notes:")
+transcript_input = st.text_area(
+    label="Paste or type doctor's notes, patient conversation transcript, etc. here...",
+    value=st.session_state.transcript_text,
+    height=250,
+    key="transcript_input_area",
+    disabled=st.session_state.is_loading_structured or st.session_state.is_loading_narrative,
+    label_visibility="collapsed"
+)
+st.session_state.transcript_text = transcript_input
 
-with col1:
-    st.subheader("📝 Option 1: Enter Transcript Text")
-    transcript_text_input = st.text_area(
-        label="Paste or type doctor's notes, patient conversation transcript, etc. here...",
-        value=st.session_state.transcript_text,
-        height=200, # Increased height slightly
-        key="transcript_text_area",
-        disabled=st.session_state.is_loading,
-        label_visibility="collapsed"
-    )
-    # Update session state immediately after input
-    st.session_state.transcript_text = transcript_text_input
-
-
-with col2:
-    st.subheader("🎤 Option 2: Upload Audio File")
-    uploaded_audio = st.file_uploader(
-        "Upload an audio file (e.g., WAV, MP3, OGG, FLAC, AAC, M4A)",
-        type=ACCEPTED_AUDIO_EXTENSIONS,
-        key="audio_uploader",
-        disabled=st.session_state.is_loading,
-        accept_multiple_files=False
-    )
-    # Update session state immediately after upload
-    st.session_state.uploaded_audio_file = uploaded_audio
-
-    st.markdown("""
-    <div class="info-box">
-        <strong>Note on Audio Files:</strong>
-        <ul>
-            <li>For direct uploads, Gemini API typically supports audio up to <strong>1 minute or ~256KB</strong>.</li>
-            <li>Longer audio may require different processing methods not included here.</li>
-            <li>Ensure audio is clear for best transcription and analysis.</li>
-        </ul>
-    </div>
-    """, unsafe_allow_html=True)
-
-
-# Action Button - Centered
-button_col_spacer1, button_col, button_col_spacer2 = st.columns([1,1.5,1]) # Adjust ratio for centering
-with button_col:
-    if st.button("✨ Analyze Input", disabled=st.session_state.is_loading, use_container_width=True):
-        # Reset previous results
-        st.session_state.summary = None
-        st.session_state.error = None
-        st.session_state.is_loading = True
-        st.session_state.current_analysis_type = None
-
-        processed_input = False
-
-        # Prioritize audio file if provided
-        if st.session_state.uploaded_audio_file is not None:
-            st.session_state.current_analysis_type = "Audio"
-            audio_bytes = st.session_state.uploaded_audio_file.getvalue()
-            audio_base64 = base64.b64encode(audio_bytes).decode('utf-8')
-            
-            # Determine MIME type from file uploader
-            uploaded_mime_type = st.session_state.uploaded_audio_file.type
-            if uploaded_mime_type not in AUDIO_MIME_TYPES:
-                st.session_state.error = f"Unsupported audio file type: {uploaded_mime_type}. Please use one of {', '.join(AUDIO_MIME_TYPES.values())}."
-                st.session_state.is_loading = False
-            else:
-                with st.spinner(f"Analyzing uploaded audio file ({st.session_state.uploaded_audio_file.name})... This may take a moment."):
-                    summary_data, error_data = analyze_input_with_gemini(audio_base64, input_type="audio", audio_mime_type=uploaded_mime_type)
-                st.session_state.summary = summary_data
-                st.session_state.error = error_data
-                processed_input = True
-        
-        # If no audio, or if audio processing failed and user also entered text, process text
-        elif st.session_state.transcript_text.strip():
-            st.session_state.current_analysis_type = "Text"
-            with st.spinner("Analyzing transcript text..."):
-                summary_data, error_data = analyze_input_with_gemini(st.session_state.transcript_text, input_type="text")
-            st.session_state.summary = summary_data
+# Analyze Transcript Button
+analyze_button_col, _ = st.columns([1, 3])
+with analyze_button_col:
+    if st.button("🔬 Analyze Transcript",
+                  disabled=st.session_state.is_loading_structured or st.session_state.is_loading_narrative,
+                  use_container_width=True):
+        if not st.session_state.transcript_text.strip():
+            st.session_state.error = "Transcript cannot be empty."
+            st.session_state.structured_summary = None
+            st.session_state.doctors_narrative_summary = None # Clear previous narrative
+        else:
+            st.session_state.is_loading_structured = True
+            st.session_state.error = None
+            st.session_state.structured_summary = None
+            st.session_state.doctors_narrative_summary = None # Clear previous narrative
+            with st.spinner("Generating structured summary..."):
+                summary_data, error_data = get_structured_summary_from_gemini(st.session_state.transcript_text)
+            st.session_state.structured_summary = summary_data
             st.session_state.error = error_data
-            processed_input = True
-        
-        else: # No input provided
-            st.session_state.error = "Please enter a transcript or upload an audio file to analyze."
-            processed_input = False
-
-        st.session_state.is_loading = False
-        # Clear the uploaded file from session state after processing to avoid re-processing on rerun,
-        # but only if it was the source of analysis.
-        # Keep text in text_area.
-        if st.session_state.current_analysis_type == "Audio":
-             st.session_state.uploaded_audio_file = None # This will clear the uploader UI too via key
-        
-        st.rerun() # Rerun to update UI based on new state
-
+            st.session_state.is_loading_structured = False
+        st.rerun()
 
 # Error Display
-if st.session_state.error and not st.session_state.is_loading: # Only show error if not loading
+if st.session_state.error:
     st.error(f"An error occurred: {st.session_state.error}")
 
-# Summary Display Section
-if st.session_state.summary and not st.session_state.is_loading:
-    analysis_source_msg = f" (from {st.session_state.current_analysis_type})" if st.session_state.current_analysis_type else ""
-    st.markdown(f"<div class='summary-section'><h2>Structured Summary{analysis_source_msg}</h2></div>", unsafe_allow_html=True)
-
+# Structured Summary Display Section
+if st.session_state.structured_summary and not st.session_state.is_loading_structured:
+    st.markdown("<div class='summary-section'><h2>Structured Summary</h2></div>", unsafe_allow_html=True)
     for key in DISPLAY_ORDER:
-        value = st.session_state.summary.get(key)
+        value = st.session_state.structured_summary.get(key)
         if value is not None:
             display_name = FRIENDLY_NAMES.get(key, key.replace("([A-Z])", " $1").title())
             st.markdown(f"<div class='summary-item'><h3>{display_name}</h3>", unsafe_allow_html=True)
@@ -412,11 +299,80 @@ if st.session_state.summary and not st.session_state.is_loading:
                 st.markdown("<p class='not-mentioned'>Not mentioned or N/A.</p>", unsafe_allow_html=True)
             st.markdown("</div>", unsafe_allow_html=True)
 
+    # Download buttons for Structured Summary
+    st.markdown("<h5>Download Structured Summary:</h5>", unsafe_allow_html=True)
+    col1, col2, col_spacer = st.columns([1,1,2])
+    with col1:
+        docx_structured_data = create_docx_from_structured_summary(st.session_state.structured_summary)
+        st.download_button(
+            label="📄 Download as DOCX",
+            data=docx_structured_data,
+            file_name="structured_summary.docx",
+            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            use_container_width=True
+        )
+    with col2:
+        pdf_structured_data = create_pdf_from_structured_summary(st.session_state.structured_summary)
+        st.download_button(
+            label="📄 Download as PDF",
+            data=pdf_structured_data,
+            file_name="structured_summary.pdf",
+            mime="application/pdf",
+            use_container_width=True
+        )
+    st.markdown("<hr>", unsafe_allow_html=True)
+
+
+    # Generate Doctor's Narrative Summary Button (appears after structured summary)
+    narrative_button_col, _ = st.columns([1.5, 2.5]) # Adjust column ratio
+    with narrative_button_col:
+        if st.button("🧑‍⚕️ Generate Doctor's Narrative Summary",
+                      disabled=st.session_state.is_loading_narrative or not st.session_state.transcript_text.strip(),
+                      use_container_width=True):
+            st.session_state.is_loading_narrative = True
+            st.session_state.error = None # Clear previous errors
+            st.session_state.doctors_narrative_summary = None
+            with st.spinner("Generating doctor's narrative summary..."):
+                narrative_data, error_data = get_doctors_narrative_summary_from_gemini(st.session_state.transcript_text)
+            st.session_state.doctors_narrative_summary = narrative_data
+            if error_data: # If there's an error specifically from narrative generation
+                st.session_state.error = error_data
+            st.session_state.is_loading_narrative = False
+            st.rerun()
+
+# Doctor's Narrative Summary Display Section
+if st.session_state.doctors_narrative_summary and not st.session_state.is_loading_narrative:
+    st.markdown("<div class='narrative-summary-section'><h2>Doctor's Narrative Summary</h2></div>", unsafe_allow_html=True)
+    st.markdown(f"<div class='narrative-summary-content'><p>{st.session_state.doctors_narrative_summary}</p></div>", unsafe_allow_html=True)
+
+    # Download buttons for Narrative Summary
+    st.markdown("<h5>Download Narrative Summary:</h5>", unsafe_allow_html=True)
+    col_narr_1, col_narr_2, col_narr_spacer = st.columns([1,1,2])
+    with col_narr_1:
+        docx_narrative_data = create_docx_from_narrative_summary(st.session_state.doctors_narrative_summary)
+        st.download_button(
+            label="📄 Download as DOCX",
+            data=docx_narrative_data,
+            file_name="doctors_narrative_summary.docx",
+            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            use_container_width=True
+        )
+    with col_narr_2:
+        pdf_narrative_data = create_pdf_from_narrative_summary(st.session_state.doctors_narrative_summary)
+        st.download_button(
+            label="📄 Download as PDF",
+            data=pdf_narrative_data,
+            file_name="doctors_narrative_summary.pdf",
+            mime="application/pdf",
+            use_container_width=True
+        )
+
+
 # Footer
 st.markdown(f"""
 <div class='footer'>
-    <p>&copy; {datetime.now().year} Dr. Scribe. Powered by Gemini AI.</p>
+    <p>&copy; {datetime.now().year} Dr. Scribe. Powered by Gemini AI. Intellectual property belongs to Dave Maher</p>
     <p>This tool is for informational purposes and should be verified by a medical professional.</p>
+    <p>Ensure you have the DejaVu font installed or provide a path to 'DejaVuSansCondensed.ttf' for optimal PDF generation, or modify the font in the code.</p>
 </div>
 """, unsafe_allow_html=True)
-
