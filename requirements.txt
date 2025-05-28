@@ -4,4 +4,3 @@ python-docx
 torch
 streamlit-audiorec
 whisper
-pyannote.audio
