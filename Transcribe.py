@@ -4,7 +4,7 @@ import json
 from datetime import datetime
 import io # For in-memory file handling
 from docx import Document # For Word documents
-from docx.shared import Pt
+# from docx.shared import Pt # Not strictly needed for basic paragraph/heading
 from fpdf import FPDF # For PDF documents
 
 # --- Page Configuration ---
@@ -89,7 +89,11 @@ def get_structured_summary_from_gemini(transcript_text):
             "responseSchema": STRUCTURED_SUMMARY_SCHEMA,
         }
     }
-    api_key = ""  # Injected by Canvas
+    try:
+        api_key = st.secrets["GEMINI_API_KEY"]
+    except KeyError:
+        return None, "GEMINI_API_KEY not found in st.secrets. Please configure it."
+        
     api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={api_key}"
 
     try:
@@ -102,11 +106,27 @@ def get_structured_summary_from_gemini(transcript_text):
             try:
                 return json.loads(json_text), None
             except json.JSONDecodeError as e:
-                return None, f"Failed to parse JSON from AI: {e}. Raw: {json_text[:200]}..."
+                st.error(f"Raw AI Response (JSON parse error): {json_text}")
+                return None, f"Failed to parse JSON from AI: {e}. Check console for raw response."
         else:
-            return None, f"Unexpected API response structure: {result.get('promptFeedback', result)}"
+            # Handle cases where the response structure is unexpected or content is missing (e.g. safety blocks)
+            error_message = f"Unexpected API response structure. Full response: {result}"
+            if result.get("promptFeedback", {}).get("blockReason"):
+                error_message = f"Content blocked by API. Reason: {result['promptFeedback']['blockReason']}. Details: {result['promptFeedback'].get('safetyRatings', '')}"
+            return None, error_message
+    except requests.exceptions.HTTPError as http_err:
+        error_detail = f"HTTP error occurred: {http_err}."
+        try:
+            error_content = http_err.response.json()
+            error_detail += f" API Message: {error_content.get('error', {}).get('message', str(error_content))}"
+        except ValueError: # If response is not JSON
+            error_detail += f" Response: {http_err.response.text}"
+        return None, error_detail
     except requests.exceptions.RequestException as e:
         return None, f"API request failed: {e}"
+    except Exception as e:
+        return None, f"An unexpected error occurred during API call: {e}"
+
 
 def get_doctors_narrative_summary_from_gemini(transcript_text):
     """
@@ -128,7 +148,11 @@ def get_doctors_narrative_summary_from_gemini(transcript_text):
     """
     chat_history = [{"role": "user", "parts": [{"text": prompt}]}]
     payload = {"contents": chat_history} # No responseSchema for plain text
-    api_key = st.secrets["GEMINI_API_KEY"]  # Injected by Canvas
+    try:
+        api_key = st.secrets["GEMINI_API_KEY"]
+    except KeyError:
+        return None, "GEMINI_API_KEY not found in st.secrets. Please configure it."
+
     api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={api_key}"
 
     try:
@@ -139,9 +163,22 @@ def get_doctors_narrative_summary_from_gemini(transcript_text):
             result["candidates"][0]["content"].get("parts") and result["candidates"][0]["content"]["parts"][0].get("text")):
             return result["candidates"][0]["content"]["parts"][0]["text"], None
         else:
-            return None, f"Unexpected API response for narrative summary: {result.get('promptFeedback', result)}"
+            error_message = f"Unexpected API response structure for narrative. Full response: {result}"
+            if result.get("promptFeedback", {}).get("blockReason"):
+                error_message = f"Narrative content blocked by API. Reason: {result['promptFeedback']['blockReason']}. Details: {result['promptFeedback'].get('safetyRatings', '')}"
+            return None, error_message
+    except requests.exceptions.HTTPError as http_err:
+        error_detail = f"HTTP error for narrative summary: {http_err}."
+        try:
+            error_content = http_err.response.json()
+            error_detail += f" API Message: {error_content.get('error', {}).get('message', str(error_content))}"
+        except ValueError:
+            error_detail += f" Response: {http_err.response.text}"
+        return None, error_detail
     except requests.exceptions.RequestException as e:
         return None, f"API request for narrative summary failed: {e}"
+    except Exception as e:
+        return None, f"An unexpected error occurred during narrative API call: {e}"
 
 # --- Download Generation Functions ---
 def create_docx_from_structured_summary(summary_data):
@@ -152,7 +189,6 @@ def create_docx_from_structured_summary(summary_data):
         friendly_name = FRIENDLY_NAMES.get(key, key.replace("([A-Z])", " $1").title())
         doc.add_heading(friendly_name, level=2)
         doc.add_paragraph(str(value) if value else "Not mentioned or N/A.")
-    
     bio = io.BytesIO()
     doc.save(bio)
     bio.seek(0)
@@ -162,24 +198,41 @@ def create_pdf_from_structured_summary(summary_data):
     pdf = FPDF()
     pdf.add_page()
     pdf.set_auto_page_break(auto=True, margin=15)
-    pdf.add_font("DejaVu", "", "DejaVuSansCondensed.ttf", uni=True) # Ensure font is available or use standard
-    pdf.set_font("DejaVu", size=16) # Use a font that supports more characters
-    
-    pdf.cell(0, 10, 'Structured Medical Summary', ln=True, align='C', border=1)
+    try:
+        # Attempt to add DejaVu font. This file must be in the same directory or a full path provided.
+        pdf.add_font("DejaVu", "", "DejaVuSansCondensed.ttf", uni=True)
+        pdf.set_font("DejaVu", size=10) # Use a font that supports more characters
+    except RuntimeError:
+        st.warning("DejaVuSansCondensed.ttf font not found. PDF will use a standard font, which may have limited character support. Place the .ttf file in the script's directory.")
+        pdf.set_font("Arial", size=10) # Fallback font
+
+    pdf.set_font_size(16)
+    pdf.cell(0, 10, 'Structured Medical Summary', ln=True, align='C', border=0) # Removed border for cleaner look
     pdf.ln(5)
 
     for key in DISPLAY_ORDER:
         value = summary_data.get(key, "Not mentioned or N/A.")
         friendly_name = FRIENDLY_NAMES.get(key, key.replace("([A-Z])", " $1").title())
         
-        pdf.set_font("DejaVu", 'B', size=12)
+        pdf.set_font_size(12)
+        if pdf.font_family == "DejaVu": # Check if custom font was loaded
+            pdf.set_font("DejaVu", 'B')
+        else:
+            pdf.set_font("Arial", 'B') # Fallback bold
+
         pdf.multi_cell(0, 7, friendly_name, ln=True)
-        pdf.set_font("DejaVu", size=10)
+        
+        pdf.set_font_size(10)
+        if pdf.font_family == "DejaVu":
+             pdf.set_font("DejaVu", '')
+        else:
+            pdf.set_font("Arial", '') # Fallback regular
+
         pdf.multi_cell(0, 7, str(value) if value else "Not mentioned or N/A.", ln=True)
         pdf.ln(3)
         
     bio = io.BytesIO()
-    pdf.output(bio) # FPDF outputs to BytesIO directly if name is not a string path
+    pdf.output(bio)
     bio.seek(0)
     return bio.getvalue()
 
@@ -187,7 +240,7 @@ def create_pdf_from_structured_summary(summary_data):
 def create_docx_from_narrative_summary(narrative_text):
     doc = Document()
     doc.add_heading("Doctor's Narrative Summary", level=1)
-    doc.add_paragraph(narrative_text)
+    doc.add_paragraph(narrative_text if narrative_text else "No narrative summary generated.")
     bio = io.BytesIO()
     doc.save(bio)
     bio.seek(0)
@@ -197,12 +250,18 @@ def create_pdf_from_narrative_summary(narrative_text):
     pdf = FPDF()
     pdf.add_page()
     pdf.set_auto_page_break(auto=True, margin=15)
-    pdf.add_font("DejaVu", "", "DejaVuSansCondensed.ttf", uni=True)
-    pdf.set_font("DejaVu", size=16)
-    pdf.cell(0, 10, "Doctor's Narrative Summary", ln=True, align='C', border=1)
+    try:
+        pdf.add_font("DejaVu", "", "DejaVuSansCondensed.ttf", uni=True)
+        pdf.set_font("DejaVu", size=10)
+    except RuntimeError:
+        # Warning already shown for structured summary, so don't repeat
+        pdf.set_font("Arial", size=10)
+
+    pdf.set_font_size(16)
+    pdf.cell(0, 10, "Doctor's Narrative Summary", ln=True, align='C', border=0)
     pdf.ln(5)
-    pdf.set_font("DejaVu", size=10)
-    pdf.multi_cell(0, 7, narrative_text, ln=True)
+    pdf.set_font_size(10)
+    pdf.multi_cell(0, 7, narrative_text if narrative_text else "No narrative summary generated.", ln=True)
     bio = io.BytesIO()
     pdf.output(bio)
     bio.seek(0)
@@ -223,7 +282,7 @@ if 'is_loading_structured' not in st.session_state:
 if 'is_loading_narrative' not in st.session_state:
     st.session_state.is_loading_narrative = False
 
-# --- Custom CSS (similar to previous) ---
+# --- Custom CSS ---
 st.markdown("""
 <style>
     .stApp { background: linear-gradient(to bottom right, #1a202c, #2d3748); color: #e2e8f0; }
@@ -238,7 +297,7 @@ st.markdown("""
     .summary-item h3 { color: #90cdf4; margin-bottom: 8px; font-size: 1.1em; }
     .summary-item p, .narrative-summary-content p { color: #cbd5e0; white-space: pre-wrap; line-height: 1.6; }
     .summary-item .not-mentioned { color: #718096; font-style: italic; }
-    .download-buttons-container { margin-top: 15px; margin-bottom:15px; display: flex; gap: 10px; }
+    .download-buttons-container { margin-top: 10px; margin-bottom:10px; display: flex; gap: 10px; } /* For potential future use if buttons are grouped */
     .footer { text-align: center; margin-top: 40px; padding-bottom: 20px; color: #a0aec0; font-size: 0.9em; }
 </style>
 """, unsafe_allow_html=True)
@@ -257,32 +316,36 @@ transcript_input = st.text_area(
     disabled=st.session_state.is_loading_structured or st.session_state.is_loading_narrative,
     label_visibility="collapsed"
 )
-st.session_state.transcript_text = transcript_input
+# Update session state immediately if text area content changes
+if transcript_input != st.session_state.transcript_text:
+    st.session_state.transcript_text = transcript_input
+    # If user edits transcript, clear previous summaries to avoid confusion
+    st.session_state.structured_summary = None
+    st.session_state.doctors_narrative_summary = None
+    st.session_state.error = None
+    # st.rerun() # Optional: uncomment if you want instant clearing on edit
 
 # Analyze Transcript Button
-analyze_button_col, _ = st.columns([1, 3])
+analyze_button_col, _ = st.columns([1, 3]) # Constrain button width
 with analyze_button_col:
     if st.button("🔬 Analyze Transcript",
-                  disabled=st.session_state.is_loading_structured or st.session_state.is_loading_narrative,
+                  disabled=st.session_state.is_loading_structured or st.session_state.is_loading_narrative or not st.session_state.transcript_text.strip(),
                   use_container_width=True):
-        if not st.session_state.transcript_text.strip():
-            st.session_state.error = "Transcript cannot be empty."
-            st.session_state.structured_summary = None
-            st.session_state.doctors_narrative_summary = None # Clear previous narrative
-        else:
-            st.session_state.is_loading_structured = True
-            st.session_state.error = None
-            st.session_state.structured_summary = None
-            st.session_state.doctors_narrative_summary = None # Clear previous narrative
-            with st.spinner("Generating structured summary..."):
-                summary_data, error_data = get_structured_summary_from_gemini(st.session_state.transcript_text)
-            st.session_state.structured_summary = summary_data
-            st.session_state.error = error_data
-            st.session_state.is_loading_structured = False
+        st.session_state.error = None # Clear previous errors
+        st.session_state.structured_summary = None
+        st.session_state.doctors_narrative_summary = None # Clear previous narrative
+        st.session_state.is_loading_structured = True
+        
+        with st.spinner("Generating structured summary..."):
+            summary_data, error_data = get_structured_summary_from_gemini(st.session_state.transcript_text)
+        
+        st.session_state.structured_summary = summary_data
+        st.session_state.error = error_data # This will display API or parsing errors
+        st.session_state.is_loading_structured = False
         st.rerun()
 
 # Error Display
-if st.session_state.error:
+if st.session_state.error and not st.session_state.is_loading_structured and not st.session_state.is_loading_narrative:
     st.error(f"An error occurred: {st.session_state.error}")
 
 # Structured Summary Display Section
@@ -290,7 +353,7 @@ if st.session_state.structured_summary and not st.session_state.is_loading_struc
     st.markdown("<div class='summary-section'><h2>Structured Summary</h2></div>", unsafe_allow_html=True)
     for key in DISPLAY_ORDER:
         value = st.session_state.structured_summary.get(key)
-        if value is not None:
+        if value is not None: # Ensure key exists
             display_name = FRIENDLY_NAMES.get(key, key.replace("([A-Z])", " $1").title())
             st.markdown(f"<div class='summary-item'><h3>{display_name}</h3>", unsafe_allow_html=True)
             if isinstance(value, str) and value.strip() and value.lower() not in ["not mentioned", "n/a", ""]:
@@ -301,42 +364,52 @@ if st.session_state.structured_summary and not st.session_state.is_loading_struc
 
     # Download buttons for Structured Summary
     st.markdown("<h5>Download Structured Summary:</h5>", unsafe_allow_html=True)
-    col1, col2, col_spacer = st.columns([1,1,2])
+    col1, col2, col_spacer = st.columns([1,1,2]) # Adjusted for better spacing
     with col1:
-        docx_structured_data = create_docx_from_structured_summary(st.session_state.structured_summary)
-        st.download_button(
-            label="📄 Download as DOCX",
-            data=docx_structured_data,
-            file_name="structured_summary.docx",
-            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            use_container_width=True
-        )
+        try:
+            docx_structured_data = create_docx_from_structured_summary(st.session_state.structured_summary)
+            st.download_button(
+                label="📄 Download as DOCX",
+                data=docx_structured_data,
+                file_name="structured_summary.docx",
+                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                use_container_width=True,
+                key="download_docx_structured"
+            )
+        except Exception as e:
+            st.error(f"Error generating DOCX for structured summary: {e}")
     with col2:
-        pdf_structured_data = create_pdf_from_structured_summary(st.session_state.structured_summary)
-        st.download_button(
-            label="📄 Download as PDF",
-            data=pdf_structured_data,
-            file_name="structured_summary.pdf",
-            mime="application/pdf",
-            use_container_width=True
-        )
-    st.markdown("<hr>", unsafe_allow_html=True)
+        try:
+            pdf_structured_data = create_pdf_from_structured_summary(st.session_state.structured_summary)
+            st.download_button(
+                label="📄 Download as PDF",
+                data=pdf_structured_data,
+                file_name="structured_summary.pdf",
+                mime="application/pdf",
+                use_container_width=True,
+                key="download_pdf_structured"
+            )
+        except Exception as e:
+            st.error(f"Error generating PDF for structured summary: {e}")
+    st.markdown("<hr style='margin-top: 20px; margin-bottom: 20px;'>", unsafe_allow_html=True)
 
 
     # Generate Doctor's Narrative Summary Button (appears after structured summary)
-    narrative_button_col, _ = st.columns([1.5, 2.5]) # Adjust column ratio
+    narrative_button_col, _ = st.columns([1.5, 2.5]) 
     with narrative_button_col:
         if st.button("🧑‍⚕️ Generate Doctor's Narrative Summary",
                       disabled=st.session_state.is_loading_narrative or not st.session_state.transcript_text.strip(),
-                      use_container_width=True):
-            st.session_state.is_loading_narrative = True
+                      use_container_width=True, key="generate_narrative_button"):
             st.session_state.error = None # Clear previous errors
             st.session_state.doctors_narrative_summary = None
+            st.session_state.is_loading_narrative = True
+            
             with st.spinner("Generating doctor's narrative summary..."):
                 narrative_data, error_data = get_doctors_narrative_summary_from_gemini(st.session_state.transcript_text)
+            
             st.session_state.doctors_narrative_summary = narrative_data
-            if error_data: # If there's an error specifically from narrative generation
-                st.session_state.error = error_data
+            if error_data: 
+                st.session_state.error = error_data # Display narrative-specific error
             st.session_state.is_loading_narrative = False
             st.rerun()
 
@@ -349,30 +422,40 @@ if st.session_state.doctors_narrative_summary and not st.session_state.is_loadin
     st.markdown("<h5>Download Narrative Summary:</h5>", unsafe_allow_html=True)
     col_narr_1, col_narr_2, col_narr_spacer = st.columns([1,1,2])
     with col_narr_1:
-        docx_narrative_data = create_docx_from_narrative_summary(st.session_state.doctors_narrative_summary)
-        st.download_button(
-            label="📄 Download as DOCX",
-            data=docx_narrative_data,
-            file_name="doctors_narrative_summary.docx",
-            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            use_container_width=True
-        )
+        try:
+            docx_narrative_data = create_docx_from_narrative_summary(st.session_state.doctors_narrative_summary)
+            st.download_button(
+                label="📄 Download as DOCX",
+                data=docx_narrative_data,
+                file_name="doctors_narrative_summary.docx",
+                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                use_container_width=True,
+                key="download_docx_narrative"
+            )
+        except Exception as e:
+            st.error(f"Error generating DOCX for narrative summary: {e}")
     with col_narr_2:
-        pdf_narrative_data = create_pdf_from_narrative_summary(st.session_state.doctors_narrative_summary)
-        st.download_button(
-            label="📄 Download as PDF",
-            data=pdf_narrative_data,
-            file_name="doctors_narrative_summary.pdf",
-            mime="application/pdf",
-            use_container_width=True
-        )
+        try:
+            pdf_narrative_data = create_pdf_from_narrative_summary(st.session_state.doctors_narrative_summary)
+            st.download_button(
+                label="📄 Download as PDF",
+                data=pdf_narrative_data,
+                file_name="doctors_narrative_summary.pdf",
+                mime="application/pdf",
+                use_container_width=True,
+                key="download_pdf_narrative"
+            )
+        except Exception as e:
+            st.error(f"Error generating PDF for narrative summary: {e}")
 
 
 # Footer
 st.markdown(f"""
 <div class='footer'>
-    <p>&copy; {datetime.now().year} Dr. Scribe. Powered by Gemini AI. Intellectual property belongs to Dave Maher</p>
+    <p>&copy; {datetime.now().year} Dr. Scribe. Powered by Gemini AI.</p>
+    <p>Intellectual property belongs to Dave Maher.</p>
     <p>This tool is for informational purposes and should be verified by a medical professional.</p>
-    <p>Ensure you have the DejaVu font installed or provide a path to 'DejaVuSansCondensed.ttf' for optimal PDF generation, or modify the font in the code.</p>
+    <p style='font-size: 0.8em;'>For PDF generation, ensure 'DejaVuSansCondensed.ttf' is in the script's directory or use a standard font.</p>
 </div>
 """, unsafe_allow_html=True)
+
