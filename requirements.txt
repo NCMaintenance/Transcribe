@@ -2,4 +2,4 @@ streamlit
 google-generativeai
 python-docx
 audio-recorder-streamlit
-streamlit-webrtc
+#streamlit-webrtc
