@@ -1,4 +1,3 @@
 streamlit
-python-docx
 st-audiorec
 google-generativeai
