@@ -5,12 +5,10 @@ from datetime import datetime
 import io
 from docx import Document
 import os
-import torch
 
-# --- New Imports for Audio Processing ---
+# --- New Imports for a pure API-based approach ---
 from st_audiorec import st_audiorec
-import whisper
-from pyannote.audio import Pipeline
+import google.generativeai as genai
 
 # --- Page Configuration ---
 st.set_page_config(
@@ -21,8 +19,6 @@ st.set_page_config(
 )
 
 # --- Helper Functions & Constants ---
-
-# (Keep all your existing constants: STRUCTURED_SUMMARY_SCHEMA, DISPLAY_ORDER, FRIENDLY_NAMES)
 STRUCTURED_SUMMARY_SCHEMA = {
     "type": "OBJECT",
     "properties": {
@@ -65,148 +61,95 @@ FRIENDLY_NAMES = {
     "followUp": "➡️ Follow-up Instructions"
 }
 
-# --- Caching for Models ---
-@st.cache_resource
-def load_whisper_model():
-    """Loads the Whisper model, cached for performance."""
-    return whisper.load_model("base")
-
-@st.cache_resource
-def load_diarization_pipeline():
-    """Loads the pyannote.audio pipeline, cached for performance."""
+# --- NEW: Transcription & Diarization with Gemini 1.5 Pro ---
+def transcribe_with_gemini(audio_path):
+    """
+    Transcribes an audio file and performs speaker diarization using the Gemini API.
+    """
     try:
-        hf_token = st.secrets["huggingface"]["access_token"]
-        pipeline = Pipeline.from_pretrained(
-            "pyannote/speaker-diarization-3.1",
-            use_auth_token=hf_token
+        # Configure the API key from Streamlit secrets
+        api_key = st.secrets["GEMINI_API_KEY"]
+        genai.configure(api_key=api_key)
+
+        # Upload the audio file to the Gemini API Files service
+        audio_file = genai.upload_file(path=audio_path)
+        
+        # Initialize the Gemini 1.5 Pro model
+        model = genai.GenerativeModel(model_name="gemini-1.5-pro-latest")
+
+        # Create the prompt with instructions for diarization
+        prompt = (
+            "You are an expert medical transcriptionist. Transcribe the following audio recording "
+            "of a doctor-patient consultation. It is critical that you accurately identify and label each speaker. "
+            "Use 'Doctor:' and 'Patient:' as the speaker labels if you can distinguish their roles based on context "
+            "and vocabulary. Otherwise, use 'Speaker 1:' and 'Speaker 2:'. "
+            "Ensure the final transcript is clear, accurate, and well-formatted."
         )
-        if torch.cuda.is_available():
-            pipeline.to(torch.device("cuda"))
-        return pipeline
-    except KeyError:
-        return "Hugging Face token not found. Please configure it in st.secrets."
-    except Exception as e:
-        return f"Error loading diarization model: {e}"
+        
+        # Send the request to the model with the audio and prompt
+        response = model.generate_content([prompt, audio_file], request_options={"timeout": 600})
 
-# --- Transcription & Diarization Function ---
-def transcribe_and_diarize(audio_path, whisper_model, diarization_pipeline):
-    """
-    Transcribes audio with Whisper and labels speakers using pyannote.
-    """
-    try:
-        # 1. Transcribe with Whisper
-        # The 'word_timestamps' option is crucial for aligning with diarization
-        transcription_result = whisper_model.transcribe(audio_path, word_timestamps=True)
+        # Clean up the uploaded file
+        genai.delete_file(audio_file.name)
 
-        # 2. Perform Diarization
-        diarization = diarization_pipeline(audio_path)
-
-        # 3. Map transcription words to speakers
-        # This is a more robust way to assign text to the correct speaker
-        speaker_data = {}
-        for segment, _, speaker in diarization.itertracks(yield_label=True):
-            if speaker not in speaker_data:
-                speaker_data[speaker] = []
-            speaker_data[speaker].append({'start': segment.start, 'end': segment.end})
-
-        final_transcript = ""
-        # Process segments in chronological order
-        for segment in transcription_result['segments']:
-            # Find which speaker this segment belongs to
-            current_speaker = "UNKNOWN"
-            for speaker, speaker_segments in speaker_data.items():
-                for speaker_segment in speaker_segments:
-                    if segment['start'] >= speaker_segment['start'] and segment['end'] <= speaker_segment['end']:
-                        current_speaker = speaker
-                        break
-                if current_speaker != "UNKNOWN":
-                    break
-            
-            # Append the formatted segment to the transcript
-            final_transcript += f"**{current_speaker}**: {segment['text'].strip()}\n\n"
-
-        return final_transcript, None
+        # Return the transcribed text with speaker labels
+        return response.text, None
 
     except Exception as e:
-        st.error(f"An error occurred during audio processing: {e}")
-        return None, str(e)
+        # Attempt to clean up the file even if an error occurs
+        try:
+            if 'audio_file' in locals() and audio_file:
+                genai.delete_file(audio_file.name)
+        except Exception as cleanup_error:
+            st.warning(f"Could not clean up uploaded file: {cleanup_error}")
+        return None, f"An error occurred with the Gemini API: {e}"
 
-
-# --- Existing API Call Functions ---
-# (Keep all your existing API functions: get_structured_summary_from_gemini, get_doctors_narrative_summary_from_gemini)
-def get_structured_summary_from_gemini(transcript_text):
+# --- UPDATED: Gemini API Call Functions (Now use Gemini 1.5 Pro) ---
+def get_structured_summary_from_gemini(transcript_text, api_key):
     """
     Sends the transcript to Gemini API for structured summarization.
     """
+    genai.configure(api_key=api_key)
+    model = genai.GenerativeModel(model_name="gemini-1.5-pro-latest")
+    
     prompt = f"""
-      You are an expert medical scribe. Analyze the following doctor's transcript or patient notes.
-      The transcript is labeled with speaker roles (e.g., SPEAKER_00, SPEAKER_01).
+      You are an expert medical scribe. Analyze the following doctor's transcript.
+      The transcript is labeled with speaker roles.
       Extract key information and structure it according to the provided JSON schema.
       Focus on accurately capturing medical details for each section.
-      If information for a specific section is not present in the transcript, use "Not mentioned" or "N/A" for that field.
-      Ensure your response is a valid JSON object matching the schema.
+      If information for a specific section is not present, use "Not mentioned".
+      Ensure your response is a valid JSON object.
 
       Transcript:
       ---
       {transcript_text}
       ---
     """
-    chat_history = [{"role": "user", "parts": [{"text": prompt}]}]
-    payload = {
-        "contents": chat_history,
-        "generationConfig": {
-            "responseMimeType": "application/json",
-            "responseSchema": STRUCTURED_SUMMARY_SCHEMA,
-        }
-    }
+    
     try:
-        api_key = st.secrets["GEMINI_API_KEY"]
-    except KeyError:
-        return None, "GEMINI_API_KEY not found in st.secrets. Please configure it."
-        
-    api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"
-
-    try:
-        response = requests.post(api_url, headers={'Content-Type': 'application/json'}, json=payload, timeout=120)
-        response.raise_for_status()
-        result = response.json()
-        if (result.get("candidates") and result["candidates"][0].get("content") and
-            result["candidates"][0]["content"].get("parts") and result["candidates"][0]["content"]["parts"][0].get("text")):
-            json_text = result["candidates"][0]["content"]["parts"][0]["text"]
-            try:
-                return json.loads(json_text), None
-            except json.JSONDecodeError as e:
-                st.error(f"Raw AI Response (JSON parse error): {json_text}")
-                return None, f"Failed to parse JSON from AI: {e}. Check console for raw response."
-        else:
-            error_message = f"Unexpected API response structure. Full response: {result}"
-            if result.get("promptFeedback", {}).get("blockReason"):
-                error_message = f"Content blocked by API. Reason: {result['promptFeedback']['blockReason']}. Details: {result['promptFeedback'].get('safetyRatings', '')}"
-            return None, error_message
-    except requests.exceptions.HTTPError as http_err:
-        error_detail = f"HTTP error occurred: {http_err}."
-        try:
-            error_content = http_err.response.json()
-            error_detail += f" API Message: {error_content.get('error', {}).get('message', str(error_content))}"
-        except ValueError: 
-            error_detail += f" Response: {http_err.response.text}"
-        return None, error_detail
-    except requests.exceptions.RequestException as e:
-        return None, f"API request failed: {e}"
+        response = model.generate_content(
+            prompt,
+            generation_config={"response_mime_type": "application/json"}
+        )
+        return json.loads(response.text), None
     except Exception as e:
-        return None, f"An unexpected error occurred during API call: {e}"
+        return None, f"Gemini structured summary error: {e}"
 
-def get_doctors_narrative_summary_from_gemini(transcript_text):
+
+def get_doctors_narrative_summary_from_gemini(transcript_text, api_key):
     """
     Sends the transcript to Gemini API for a narrative summary in doctor's terms.
     """
+    genai.configure(api_key=api_key)
+    model = genai.GenerativeModel(model_name="gemini-1.5-pro-latest")
+    
     prompt = f"""
-      You are an expert medical AI. Analyze the following doctor's transcript or patient notes.
-      The transcript is labeled with speaker roles (e.g., SPEAKER_00, SPEAKER_01).
+      You are an expert medical AI. Analyze the following doctor's transcript.
+      The transcript is labeled with speaker roles.
       Generate a concise, narrative summary of the consultation suitable for a doctor's review.
       The summary should be in prose, use appropriate medical terminology, and highlight clinically relevant information,
       including chief complaint, pertinent history, key examination findings, assessment/diagnosis, and the treatment plan.
-      Do NOT use a JSON structure for this summary. Provide a plain text narrative.
+      Provide a plain text narrative.
 
       Transcript:
       ---
@@ -215,42 +158,14 @@ def get_doctors_narrative_summary_from_gemini(transcript_text):
 
       Doctor's Narrative Summary:
     """
-    chat_history = [{"role": "user", "parts": [{"text": prompt}]}]
-    payload = {"contents": chat_history} 
+    
     try:
-        api_key = st.secrets["GEMINI_API_KEY"]
-    except KeyError:
-        return None, "GEMINI_API_KEY not found in st.secrets. Please configure it."
-
-    api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"
-
-    try:
-        response = requests.post(api_url, headers={'Content-Type': 'application/json'}, json=payload, timeout=120)
-        response.raise_for_status()
-        result = response.json()
-        if (result.get("candidates") and result["candidates"][0].get("content") and
-            result["candidates"][0]["content"].get("parts") and result["candidates"][0]["content"]["parts"][0].get("text")):
-            return result["candidates"][0]["content"]["parts"][0]["text"], None
-        else:
-            error_message = f"Unexpected API response structure for narrative. Full response: {result}"
-            if result.get("promptFeedback", {}).get("blockReason"):
-                error_message = f"Narrative content blocked by API. Reason: {result['promptFeedback']['blockReason']}. Details: {result['promptFeedback'].get('safetyRatings', '')}"
-            return None, error_message
-    except requests.exceptions.HTTPError as http_err:
-        error_detail = f"HTTP error for narrative summary: {http_err}."
-        try:
-            error_content = http_err.response.json()
-            error_detail += f" API Message: {error_content.get('error', {}).get('message', str(error_content))}"
-        except ValueError:
-            error_detail += f" Response: {http_err.response.text}"
-        return None, error_detail
-    except requests.exceptions.RequestException as e:
-        return None, f"API request for narrative summary failed: {e}"
+        response = model.generate_content(prompt)
+        return response.text, None
     except Exception as e:
-        return None, f"An unexpected error occurred during narrative API call: {e}"
+        return None, f"Gemini narrative summary error: {e}"
 
 # --- Download Generation Functions ---
-# (Keep all your existing download functions: create_docx_from_structured_summary, create_docx_from_narrative_summary)
 def create_docx_from_structured_summary(summary_data):
     doc = Document()
     doc.add_heading('Structured Medical Summary', level=1)
@@ -274,7 +189,6 @@ def create_docx_from_narrative_summary(narrative_text):
     return bio.getvalue()
 
 # --- Initialize Session State ---
-# (Keep all your existing session state initializations)
 if 'transcript_text' not in st.session_state:
     st.session_state.transcript_text = ""
 if 'structured_summary' not in st.session_state:
@@ -289,7 +203,6 @@ if 'is_loading_narrative' not in st.session_state:
     st.session_state.is_loading_narrative = False
 if 'is_loading_audio' not in st.session_state:
     st.session_state.is_loading_audio = False
-
 
 # --- Custom CSS ---
 st.markdown("""
@@ -312,52 +225,42 @@ st.markdown("""
 
 # --- UI Layout ---
 st.markdown("<h1>Dr. Scribe 🩺</h1>", unsafe_allow_html=True)
-st.markdown("<p class='subtitle'>AI-Powered Medical Transcription Analysis & Summarization</p>", unsafe_allow_html=True)
+st.markdown("<p class='subtitle'>AI-Powered Medical Transcription, Diarization, and Analysis</p>", unsafe_allow_html=True)
 
-# --- NEW: Audio Input Section ---
+# --- Audio Input Section ---
 st.markdown("### 🎙️ Option 1: Record Audio Directly")
 wav_audio_data = st_audiorec()
 
-# This block handles the audio transcription
 if wav_audio_data is not None and not st.session_state.is_loading_audio:
-    if st.button("🎤 Transcribe Recording"):
+    if st.button("🎤 Transcribe Recording with Gemini"):
         st.session_state.is_loading_audio = True
         st.session_state.error = None
-        st.session_state.transcript_text = "" # Clear previous transcript
+        st.session_state.transcript_text = ""
+        st.session_state.structured_summary = None
+        st.session_state.doctors_narrative_summary = None
+
+        audio_file_path = "temp_audio.wav"
+        with open(audio_file_path, "wb") as f:
+            f.write(wav_audio_data)
+
+        with st.spinner("Gemini 1.5 Pro is transcribing and identifying speakers... Please wait. ⏳"):
+            final_transcript, error = transcribe_with_gemini(audio_file_path)
+            if error:
+                st.session_state.error = error
+            else:
+                st.session_state.transcript_text = final_transcript
         
-        # Load models
-        whisper_model = load_whisper_model()
-        diarization_pipeline = load_diarization_pipeline()
-
-        # Check if models loaded correctly
-        if isinstance(diarization_pipeline, str):
-            st.error(diarization_pipeline)
-            st.session_state.is_loading_audio = False
-        else:
-            audio_file_path = "temp_audio.wav"
-            with open(audio_file_path, "wb") as f:
-                f.write(wav_audio_data)
-
-            with st.spinner("Transcription in progress... This may take a moment. ⏳"):
-                final_transcript, error = transcribe_and_diarize(audio_file_path, whisper_model, diarization_pipeline)
-                if error:
-                    st.session_state.error = error
-                else:
-                    # Update the text area via session state
-                    st.session_state.transcript_text = final_transcript
-            
-            st.session_state.is_loading_audio = False
-            # Clean up the temp file
-            if os.path.exists(audio_file_path):
-                os.remove(audio_file_path)
-            st.rerun() # Rerun to update the text_area with the new transcript
+        st.session_state.is_loading_audio = False
+        if os.path.exists(audio_file_path):
+            os.remove(audio_file_path)
+        st.rerun()
 
 st.markdown("<hr>", unsafe_allow_html=True)
 
-# --- MODIFIED: Text Input Section ---
+# --- Text Input Section ---
 st.markdown("### 📝 Option 2: Paste Transcript or Notes")
 transcript_input = st.text_area(
-    label="Your speaker-labeled transcript will appear here after recording, or you can paste your own text.",
+    label="Your Gemini-generated transcript will appear here, or you can paste your own text.",
     value=st.session_state.transcript_text,
     height=300,
     key="transcript_input_area",
@@ -365,15 +268,19 @@ transcript_input = st.text_area(
     label_visibility="collapsed"
 )
 
-# If user manually edits the text area
 if transcript_input != st.session_state.transcript_text:
     st.session_state.transcript_text = transcript_input
-    # Clear downstream results if the source transcript changes
     st.session_state.structured_summary = None
     st.session_state.doctors_narrative_summary = None
     st.session_state.error = None
 
 # --- Main Analyze Button ---
+try:
+    gemini_api_key = st.secrets["GEMINI_API_KEY"]
+except KeyError:
+    st.error("GEMINI_API_KEY not found in st.secrets. Please add it to continue.")
+    st.stop()
+
 analyze_button_col, _ = st.columns([1, 3])
 with analyze_button_col:
     if st.button("🔬 Analyze Transcript",
@@ -387,8 +294,8 @@ with analyze_button_col:
         st.session_state.doctors_narrative_summary = None
         st.session_state.is_loading_structured = True
 
-        with st.spinner("Generating structured summary..."):
-            summary_data, error_data = get_structured_summary_from_gemini(st.session_state.transcript_text)
+        with st.spinner("Generating structured summary with Gemini..."):
+            summary_data, error_data = get_structured_summary_from_gemini(st.session_state.transcript_text, gemini_api_key)
 
         st.session_state.structured_summary = summary_data
         st.session_state.error = error_data
@@ -396,8 +303,6 @@ with analyze_button_col:
         st.rerun()
 
 # --- Error Display & Results Sections ---
-# (The rest of your code remains the same)
-
 if st.session_state.error and not any([st.session_state.is_loading_structured, st.session_state.is_loading_narrative, st.session_state.is_loading_audio]):
     st.error(f"An error occurred: {st.session_state.error}")
 
@@ -441,8 +346,8 @@ if st.session_state.structured_summary and not st.session_state.is_loading_struc
             st.session_state.doctors_narrative_summary = None
             st.session_state.is_loading_narrative = True
 
-            with st.spinner("Generating doctor's narrative summary..."):
-                narrative_data, error_data = get_doctors_narrative_summary_from_gemini(st.session_state.transcript_text)
+            with st.spinner("Generating doctor's narrative summary with Gemini..."):
+                narrative_data, error_data = get_doctors_narrative_summary_from_gemini(st.session_state.transcript_text, gemini_api_key)
 
             st.session_state.doctors_narrative_summary = narrative_data
             if error_data:
@@ -473,7 +378,7 @@ if st.session_state.doctors_narrative_summary and not st.session_state.is_loadin
 # Footer
 st.markdown(f"""
 <div class='footer'>
-    <p>&copy; {datetime.now().year} Dr. Scribe. Powered by Gemini AI, Whisper, and Pyannote.</p>
+    <p>&copy; {datetime.now().year} Dr. Scribe. Powered entirely by Google Gemini AI.</p>
     <p>This tool is for informational purposes and should be verified by a medical professional.</p>
 </div>
 """, unsafe_allow_html=True)
