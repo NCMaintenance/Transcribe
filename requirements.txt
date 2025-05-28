@@ -1,12 +1,5 @@
-# Core Streamlit and web requests
-streamlit==1.34.1
-requests==2.31.0
-
-# Document generation
-python-docx==1.1.2
-
-# Audio recording widget
+streamlit
+requests
+python-docx
 st-audiorec==0.1.2
-
-# Google Gemini API
 google-generativeai==0.5.4
