@@ -6,8 +6,8 @@ import io
 from docx import Document
 import os
 
-# --- New Imports for a pure API-based approach ---
-from st_audiorec import st_audiorec
+# --- NEW: Using audio-recorder-streamlit ---
+from audio_recorder_streamlit import audio_recorder
 import google.generativeai as genai
 
 # --- Page Configuration ---
@@ -61,23 +61,16 @@ FRIENDLY_NAMES = {
     "followUp": "➡️ Follow-up Instructions"
 }
 
-# --- NEW: Transcription & Diarization with Gemini 1.5 Pro ---
+# --- Transcription & Diarization with Gemini 1.5 Pro ---
 def transcribe_with_gemini(audio_path):
     """
     Transcribes an audio file and performs speaker diarization using the Gemini API.
     """
     try:
-        # Configure the API key from Streamlit secrets
         api_key = st.secrets["GEMINI_API_KEY"]
         genai.configure(api_key=api_key)
-
-        # Upload the audio file to the Gemini API Files service
         audio_file = genai.upload_file(path=audio_path)
-        
-        # Initialize the Gemini 1.5 Pro model
         model = genai.GenerativeModel(model_name="gemini-1.5-pro-latest")
-
-        # Create the prompt with instructions for diarization
         prompt = (
             "You are an expert medical transcriptionist. Transcribe the following audio recording "
             "of a doctor-patient consultation. It is critical that you accurately identify and label each speaker. "
@@ -85,18 +78,10 @@ def transcribe_with_gemini(audio_path):
             "and vocabulary. Otherwise, use 'Speaker 1:' and 'Speaker 2:'. "
             "Ensure the final transcript is clear, accurate, and well-formatted."
         )
-        
-        # Send the request to the model with the audio and prompt
         response = model.generate_content([prompt, audio_file], request_options={"timeout": 600})
-
-        # Clean up the uploaded file
         genai.delete_file(audio_file.name)
-
-        # Return the transcribed text with speaker labels
         return response.text, None
-
     except Exception as e:
-        # Attempt to clean up the file even if an error occurs
         try:
             if 'audio_file' in locals() and audio_file:
                 genai.delete_file(audio_file.name)
@@ -104,14 +89,10 @@ def transcribe_with_gemini(audio_path):
             st.warning(f"Could not clean up uploaded file: {cleanup_error}")
         return None, f"An error occurred with the Gemini API: {e}"
 
-# --- UPDATED: Gemini API Call Functions (Now use Gemini 1.5 Pro) ---
+# --- Gemini API Call Functions for Summaries ---
 def get_structured_summary_from_gemini(transcript_text, api_key):
-    """
-    Sends the transcript to Gemini API for structured summarization.
-    """
     genai.configure(api_key=api_key)
     model = genai.GenerativeModel(model_name="gemini-1.5-pro-latest")
-    
     prompt = f"""
       You are an expert medical scribe. Analyze the following doctor's transcript.
       The transcript is labeled with speaker roles.
@@ -125,24 +106,18 @@ def get_structured_summary_from_gemini(transcript_text, api_key):
       {transcript_text}
       ---
     """
-    
     try:
         response = model.generate_content(
             prompt,
-            generation_config={"response_mime_type": "application/json"}
+            generation_config={"response_mime_type": "application/json", "response_schema": STRUCTURED_SUMMARY_SCHEMA}
         )
         return json.loads(response.text), None
     except Exception as e:
         return None, f"Gemini structured summary error: {e}"
 
-
 def get_doctors_narrative_summary_from_gemini(transcript_text, api_key):
-    """
-    Sends the transcript to Gemini API for a narrative summary in doctor's terms.
-    """
     genai.configure(api_key=api_key)
     model = genai.GenerativeModel(model_name="gemini-1.5-pro-latest")
-    
     prompt = f"""
       You are an expert medical AI. Analyze the following doctor's transcript.
       The transcript is labeled with speaker roles.
@@ -158,7 +133,6 @@ def get_doctors_narrative_summary_from_gemini(transcript_text, api_key):
 
       Doctor's Narrative Summary:
     """
-    
     try:
         response = model.generate_content(prompt)
         return response.text, None
@@ -227,11 +201,22 @@ st.markdown("""
 st.markdown("<h1>Dr. Scribe 🩺</h1>", unsafe_allow_html=True)
 st.markdown("<p class='subtitle'>AI-Powered Medical Transcription, Diarization, and Analysis</p>", unsafe_allow_html=True)
 
-# --- Audio Input Section ---
+# --- Audio Input Section using audio-recorder-streamlit ---
 st.markdown("### 🎙️ Option 1: Record Audio Directly")
-wav_audio_data = st_audiorec()
+# You can customize the look and behavior of the recorder
+# For example: audio_recorder(text="Click to Record", icon_size="2x", pause_threshold=2.0)
+audio_bytes = audio_recorder(
+    text="Click the mic to start recording",
+    recording_color="#e8b62c", # A gold-like color for recording
+    neutral_color="#6aa36f",  # A calm green for idle
+    icon_name="microphone",      # Using a more standard microphone icon
+    icon_size="3x",
+    pause_threshold=2.0,       # Auto-stop after 2s of silence
+    sample_rate=44100          # Standard sample rate
+)
 
-if wav_audio_data is not None and not st.session_state.is_loading_audio:
+
+if audio_bytes and not st.session_state.is_loading_audio: # Check if audio_bytes is not None and not empty
     if st.button("🎤 Transcribe Recording with Gemini"):
         st.session_state.is_loading_audio = True
         st.session_state.error = None
@@ -241,7 +226,7 @@ if wav_audio_data is not None and not st.session_state.is_loading_audio:
 
         audio_file_path = "temp_audio.wav"
         with open(audio_file_path, "wb") as f:
-            f.write(wav_audio_data)
+            f.write(audio_bytes) # audio_bytes is directly usable
 
         with st.spinner("Gemini 1.5 Pro is transcribing and identifying speakers... Please wait. ⏳"):
             final_transcript, error = transcribe_with_gemini(audio_file_path)
@@ -382,3 +367,4 @@ st.markdown(f"""
     <p>This tool is for informational purposes and should be verified by a medical professional.</p>
 </div>
 """, unsafe_allow_html=True)
+
