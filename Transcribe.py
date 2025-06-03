@@ -1,4 +1,4 @@
-import streamlit as st 
+import streamlit as st
 import google.generativeai as genai
 import json
 import os
@@ -70,32 +70,48 @@ if "transcript" in st.session_state:
     if st.button("📊 Summarise Transcript"):
         with st.spinner("Generating structured and narrative summaries..."):
 
-            # Structured Summary Prompt
+            # Structured Summary Prompt (enforce JSON)
             prompt_structured = f"""
-You are a medical scribe. Extract key details from this doctor–patient transcript and return JSON with:
-- patientName
-- dateOfVisit
-- chiefComplaint
-- historyPresentIllness
-- pastMedicalHistory
-- medications
-- allergies
-- reviewOfSystems
-- physicalExam
-- assessment
-- plan
-- followUp
+You are a medical scribe. Extract key details from this doctor–patient transcript.
 
-If not mentioned, use "Not mentioned".
+Return **only valid JSON**, formatted exactly as follows, with all fields included:
+{{
+  "patientName": "...",
+  "dateOfVisit": "...",
+  "chiefComplaint": "...",
+  "historyPresentIllness": "...",
+  "pastMedicalHistory": "...",
+  "medications": "...",
+  "allergies": "...",
+  "reviewOfSystems": "...",
+  "physicalExam": "...",
+  "assessment": "...",
+  "plan": "...",
+  "followUp": "..."
+}}
+
+If any detail is not mentioned, use the string "Not mentioned".
+
 Transcript:
 {st.session_state['transcript']}
             """
+
             response1 = model.generate_content(prompt_structured)
-            structured = json.loads(response1.text)
+
+            # Debug: Show raw output to catch JSON issues
+            st.subheader("🛠️ Raw Gemini JSON Output")
+            st.code(response1.text, language="json")
+
+            try:
+                structured = json.loads(response1.text)
+            except json.JSONDecodeError as e:
+                st.error("Failed to parse the structured summary as JSON. Please check the raw output above.")
+                raise e
 
             # Narrative Summary Prompt
             prompt_narrative = f"""
-Summarise the transcript into a coherent, professional doctor’s narrative summary using appropriate medical language.
+Summarise the transcript into a coherent, professional doctor's narrative summary using appropriate medical language.
+
 Transcript:
 {st.session_state['transcript']}
             """
@@ -141,6 +157,7 @@ if "structured" in st.session_state and "narrative" in st.session_state:
         data=create_docx(st.session_state["narrative"], "narrative"),
         file_name="narrative_summary.docx",
         mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+
 
 
 
