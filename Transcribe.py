@@ -7,7 +7,7 @@ from docx import Document
 import io
 import tempfile
 
-# --- Set up Gemini API ---
+# --- Configure Gemini API ---
 genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
 model = genai.GenerativeModel("gemini-1.5-pro-latest")
 
@@ -24,18 +24,22 @@ audio_format = "audio/wav"
 if mode == "Upload audio file":
     uploaded_audio = st.file_uploader("Upload an audio file (WAV, MP3, M4A)", type=["wav", "mp3", "m4a"])
     if uploaded_audio:
-        audio_bytes = uploaded_audio.read()
-        st.audio(audio_bytes, format=audio_format)
+        st.audio(uploaded_audio, format=audio_format)
+        audio_bytes = uploaded_audio  # Keep file-like object for now
 
 elif mode == "Record using microphone":
     recorded_audio = st.audio_input("🎙️ Click the microphone to record, then click again to stop and process.")
     if recorded_audio:
-        audio_bytes = recorded_audio
-        st.audio(audio_bytes, format=audio_format)
+        st.audio(recorded_audio, format=audio_format)
+        audio_bytes = recorded_audio  # Already in bytes
 
 # --- Transcription and Analysis ---
 if audio_bytes and st.button("🧠 Transcribe & Analyse"):
     with st.spinner("Processing with Gemini..."):
+
+        # Convert to bytes if it's a file-like object
+        if hasattr(audio_bytes, "read"):
+            audio_bytes = audio_bytes.read()
 
         # Save to temporary file
         with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp_file:
@@ -45,7 +49,6 @@ if audio_bytes and st.button("🧠 Transcribe & Analyse"):
         try:
             audio_file = genai.upload_file(path=tmp_file_path)
 
-            # Transcription Prompt
             prompt = (
                 "You are a medical transcriptionist. Transcribe the following doctor–patient consultation. "
                 "Label speakers as 'Doctor:' or 'Patient:' where possible."
@@ -138,6 +141,7 @@ if "structured" in st.session_state and "narrative" in st.session_state:
         data=create_docx(st.session_state["narrative"], "narrative"),
         file_name="narrative_summary.docx",
         mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+
 
 
 # import streamlit as st
