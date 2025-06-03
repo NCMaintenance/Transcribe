@@ -6,6 +6,7 @@ from datetime import datetime
 from docx import Document
 import io
 import tempfile
+import re
 
 # --- Configure Gemini API ---
 genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
@@ -25,7 +26,7 @@ if mode == "Upload audio file":
     uploaded_audio = st.file_uploader("Upload an audio file (WAV, MP3, M4A)", type=["wav", "mp3", "m4a"])
     if uploaded_audio:
         st.audio(uploaded_audio, format=audio_format)
-        audio_bytes = uploaded_audio  # Keep file-like object for now
+        audio_bytes = uploaded_audio  # File-like object
 
 elif mode == "Record using microphone":
     recorded_audio = st.audio_input("🎙️ Click the microphone to record, then click again to stop and process.")
@@ -70,48 +71,45 @@ if "transcript" in st.session_state:
     if st.button("📊 Summarise Transcript"):
         with st.spinner("Generating structured and narrative summaries..."):
 
-            # Structured Summary Prompt (enforce JSON)
+            # --- Structured Summary ---
             prompt_structured = f"""
-You are a medical scribe. Extract key details from this doctor–patient transcript.
+You are a medical scribe. Extract key details from this doctor–patient transcript and return JSON with:
+- patientName
+- dateOfVisit
+- chiefComplaint
+- historyPresentIllness
+- pastMedicalHistory
+- medications
+- allergies
+- reviewOfSystems
+- physicalExam
+- assessment
+- plan
+- followUp
 
-Return **only valid JSON**, formatted exactly as follows, with all fields included:
-{{
-  "patientName": "...",
-  "dateOfVisit": "...",
-  "chiefComplaint": "...",
-  "historyPresentIllness": "...",
-  "pastMedicalHistory": "...",
-  "medications": "...",
-  "allergies": "...",
-  "reviewOfSystems": "...",
-  "physicalExam": "...",
-  "assessment": "...",
-  "plan": "...",
-  "followUp": "..."
-}}
-
-If any detail is not mentioned, use the string "Not mentioned".
-
+If not mentioned, use "Not mentioned".
 Transcript:
 {st.session_state['transcript']}
             """
-
             response1 = model.generate_content(prompt_structured)
 
-            # Debug: Show raw output to catch JSON issues
-            st.subheader("🛠️ Raw Gemini JSON Output")
-            st.code(response1.text, language="json")
+            # Parse JSON safely
+            json_match = re.search(r"\{.*\}", response1.text, re.DOTALL)
+            if json_match:
+                try:
+                    structured = json.loads(json_match.group())
+                except json.JSONDecodeError as e:
+                    st.error("❌ JSON found but failed to parse. Check formatting.")
+                    st.code(json_match.group(), language="json")
+                    raise e
+            else:
+                st.error("❌ No valid JSON object found in Gemini's response.")
+                st.code(response1.text)
+                raise ValueError("No valid JSON found.")
 
-            try:
-                structured = json.loads(response1.text)
-            except json.JSONDecodeError as e:
-                st.error("Failed to parse the structured summary as JSON. Please check the raw output above.")
-                raise e
-
-            # Narrative Summary Prompt
+            # --- Narrative Summary ---
             prompt_narrative = f"""
-Summarise the transcript into a coherent, professional doctor's narrative summary using appropriate medical language.
-
+Summarise the transcript into a coherent, professional doctor’s narrative summary using appropriate medical language.
 Transcript:
 {st.session_state['transcript']}
             """
