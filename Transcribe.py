@@ -13,7 +13,7 @@ model = genai.GenerativeModel("gemini-1.5-pro-latest")
 
 st.set_page_config(page_title="Dr. Scribe", layout="wide")
 st.title("🩺 Dr. Scribe")
-st.markdown("### 📤 Upload or Record Doctor-Patient Audio")
+st.markdown("### 📤 Upload or Record Doctor–Patient Audio")
 
 # --- Input Method Selection ---
 mode = st.radio("Choose input method:", ["Upload audio file", "Record using microphone"])
@@ -24,7 +24,7 @@ audio_format = "audio/wav"
 if mode == "Upload audio file":
     uploaded_audio = st.file_uploader("Upload an audio file (WAV, MP3, M4A)", type=["wav", "mp3", "m4a"])
     if uploaded_audio:
-        audio_bytes = uploaded_audio.read()  # 🔥 Fix: convert UploadedFile to bytes
+        audio_bytes = uploaded_audio.read()
         st.audio(audio_bytes, format=audio_format)
 
 elif mode == "Record using microphone":
@@ -33,11 +33,11 @@ elif mode == "Record using microphone":
         audio_bytes = recorded_audio
         st.audio(audio_bytes, format=audio_format)
 
-# --- Transcription ---
-if audio_bytes and st.button("🧠 Transcribe & Analyze"):
+# --- Transcription and Analysis ---
+if audio_bytes and st.button("🧠 Transcribe & Analyse"):
     with st.spinner("Processing with Gemini..."):
 
-        # Save to temp file
+        # Save to temporary file
         with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp_file:
             tmp_file.write(audio_bytes)
             tmp_file_path = tmp_file.name
@@ -45,30 +45,31 @@ if audio_bytes and st.button("🧠 Transcribe & Analyze"):
         try:
             audio_file = genai.upload_file(path=tmp_file_path)
 
+            # Transcription Prompt
             prompt = (
-                "You are a medical transcriptionist. Transcribe the following doctor-patient consultation. "
-                "Label speakers as 'Doctor:' or 'Patient:' when possible."
+                "You are a medical transcriptionist. Transcribe the following doctor–patient consultation. "
+                "Label speakers as 'Doctor:' or 'Patient:' where possible."
             )
             result = model.generate_content([prompt, audio_file], request_options={"timeout": 600})
             transcript = result.text
             genai.delete_file(audio_file.name)
 
             st.session_state["transcript"] = transcript
-            st.success("Transcript generated!")
+            st.success("Transcript generated successfully.")
         finally:
             os.remove(tmp_file_path)
 
-# --- Show Transcript ---
+# --- Display Transcript ---
 if "transcript" in st.session_state:
     st.markdown("## 📄 Transcript")
     st.text_area("Transcript", st.session_state["transcript"], height=300)
 
-    if st.button("📊 Summarize Transcript"):
+    if st.button("📊 Summarise Transcript"):
         with st.spinner("Generating structured and narrative summaries..."):
 
-            # --- Structured Summary ---
+            # Structured Summary Prompt
             prompt_structured = f"""
-You are a medical scribe. Extract key details from this doctor-patient transcript and return JSON with:
+You are a medical scribe. Extract key details from this doctor–patient transcript and return JSON with:
 - patientName
 - dateOfVisit
 - chiefComplaint
@@ -89,9 +90,9 @@ Transcript:
             response1 = model.generate_content(prompt_structured)
             structured = json.loads(response1.text)
 
-            # --- Narrative Summary ---
+            # Narrative Summary Prompt
             prompt_narrative = f"""
-Summarize the transcript into a coherent, professional doctor’s narrative summary using appropriate medical language.
+Summarise the transcript into a coherent, professional doctor’s narrative summary using appropriate medical language.
 Transcript:
 {st.session_state['transcript']}
             """
@@ -100,9 +101,9 @@ Transcript:
 
             st.session_state["structured"] = structured
             st.session_state["narrative"] = narrative
-            st.success("Summaries ready.")
+            st.success("Summaries generated.")
 
-# --- Display Summaries ---
+# --- DOCX Export Function ---
 def create_docx(content, kind="structured"):
     doc = Document()
     if kind == "structured":
@@ -111,13 +112,14 @@ def create_docx(content, kind="structured"):
             doc.add_heading(key.replace('_', ' ').title(), level=2)
             doc.add_paragraph(val)
     else:
-        doc.add_heading("Doctor's Narrative Summary", level=1)
+        doc.add_heading("Doctor’s Narrative Summary", level=1)
         doc.add_paragraph(content)
     output = io.BytesIO()
     doc.save(output)
     output.seek(0)
     return output
 
+# --- Display Summaries and Downloads ---
 if "structured" in st.session_state and "narrative" in st.session_state:
     st.markdown("## 📑 Structured Summary")
     for k, v in st.session_state["structured"].items():
@@ -129,13 +131,14 @@ if "structured" in st.session_state and "narrative" in st.session_state:
         mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
 
     st.markdown("---")
-    st.markdown("## 🧑‍⚕️ Doctor's Narrative Summary")
+    st.markdown("## 🧑‍⚕️ Doctor’s Narrative Summary")
     st.write(st.session_state["narrative"])
 
     st.download_button("📥 Download Narrative Summary (DOCX)",
         data=create_docx(st.session_state["narrative"], "narrative"),
         file_name="narrative_summary.docx",
         mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+
 
 # import streamlit as st
 # import google.generativeai as genai
@@ -160,7 +163,7 @@ if "structured" in st.session_state and "narrative" in st.session_state:
 # if uploaded_audio:
 #     st.audio(uploaded_audio, format="audio/wav")
 
-#     if st.button("🧠 Transcribe & Analyze"):
+#     if st.button("🧠 Transcribe & analyse"):
 #         with st.spinner("Processing with Gemini..."):
 
 #             # Save audio to temp file
