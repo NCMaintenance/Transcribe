@@ -378,9 +378,9 @@ st.markdown("Created by Dave Maher")
 #         mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
 
 # --- Footer ---
-st.markdown("---")
-st.markdown("This implementation has been tested using test data. Adjustments may be required to ensure optimal performance with real-world data.")
-st.markdown("Created by Dave Maher")
+# st.markdown("---")
+# st.markdown("This implementation has been tested using test data. Adjustments may be required to ensure optimal performance with real-world data.")
+# st.markdown("Created by Dave Maher")
 # import streamlit as st
 # import google.generativeai as genai
 # import json
