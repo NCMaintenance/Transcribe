@@ -24,8 +24,9 @@ audio_format = "audio/wav"
 if mode == "Upload audio file":
     uploaded_audio = st.file_uploader("Upload an audio file (WAV, MP3, M4A)", type=["wav", "mp3", "m4a"])
     if uploaded_audio:
-        audio_bytes = uploaded_audio.read()
+        audio_bytes = uploaded_audio.read()  # 🔥 Fix: convert UploadedFile to bytes
         st.audio(audio_bytes, format=audio_format)
+
 elif mode == "Record using microphone":
     recorded_audio = st.audio_input("🎙️ Click the microphone to record, then click again to stop and process.")
     if recorded_audio:
