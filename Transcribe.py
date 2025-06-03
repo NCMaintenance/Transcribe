@@ -9,7 +9,7 @@ import tempfile
 
 # --- Configure Gemini API ---
 genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
-model = genai.GenerativeModel("gemini-1.5-pro-latest")
+model = genai.GenerativeModel(model_name='gemini-2.0-flash-exp')
 
 st.set_page_config(page_title="Dr. Scribe", layout="wide")
 st.title("🩺 Dr. Scribe")
