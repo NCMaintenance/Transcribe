@@ -3,4 +3,6 @@ google-generativeai
 python-docx
 audio-recorder-streamlit
 plotly
+moviepy
+pydub
 #streamlit-webrtc
